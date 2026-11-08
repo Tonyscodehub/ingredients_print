@@ -18,7 +18,7 @@ fn main() {
 #[cfg(not(windows))]
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| config::Config::default().spreadsheet);
-    match xlsx::read_products(std::path::Path::new(&path)) {
+    match xlsx::read_products(std::path::Path::new(&path), xlsx::Marking::Brackets) {
         Ok(ps) => {
             for p in ps {
                 println!("{}", p.name);

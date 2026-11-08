@@ -41,6 +41,7 @@ const S_CONTACT: i32 = 2014;
 const S_BESTBEFORE: i32 = 2015;
 const S_ADDRESS: i32 = 2016;
 const S_WARNING: i32 = 2017;
+const S_MARKING: i32 = 2018;
 
 const TIMER_POLL: usize = 1;
 const WM_APP_STATUS: u32 = WM_APP + 1;
@@ -280,11 +281,11 @@ pub fn run() {
 // Loading
 
 fn reload(manual: bool) {
-    let Some(path) = with(|a| a.cfg.spreadsheet.clone()) else { return };
+    let Some((path, marking)) = with(|a| (a.cfg.spreadsheet.clone(), a.cfg.marking())) else { return };
     let p = Path::new(&path);
     let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let file = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(path.clone());
-    match xlsx::read_products(p) {
+    match xlsx::read_products(p, marking) {
         Ok(ps) => {
             let n = ps.len();
             let changed = with(|a| {
@@ -772,7 +773,7 @@ fn open_settings() {
         }
         let cls = wide("AllergenSettings");
         let title = wide("Settings");
-        let (w, h) = (s(660), s(670));
+        let (w, h) = (s(660), s(710));
         let mut mr: RECT = std::mem::zeroed();
         GetWindowRect(main, &mut mr);
         let x = mr.left + ((mr.right - mr.left) - w) / 2;
@@ -856,6 +857,15 @@ fn open_settings() {
             SendMessageW(lc, CB_ADDSTRING, 0, t.as_ptr() as isize);
         }
         SendMessageW(lc, CB_SETCURSEL, cfg.one_per_line as usize, 0);
+        y += step;
+
+        label("Allergens are:", lx, y, lw);
+        let mc = place(S_MARKING, "COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST as u32, 0, cx, y + s(2), s(414), s(200));
+        for t in ["Text in (brackets) – only the bracketed text prints bold", "Bold text in the spreadsheet"] {
+            let t = wide(t);
+            SendMessageW(mc, CB_ADDSTRING, 0, t.as_ptr() as isize);
+        }
+        SendMessageW(mc, CB_SETCURSEL, (!cfg.allergens_in_brackets) as usize, 0);
         y += step;
 
         label("Re-read every (minutes):", lx, y, lw);
@@ -956,6 +966,7 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
     cfg.refresh_minutes = num(S_REFRESH, "Refresh interval", 1.0, 1440.0)? as u32;
     cfg.footer = get_text(item(S_FOOTER)).trim().to_string();
     cfg.business_name = get_text(item(S_BUSINESS)).trim().to_string();
+    cfg.allergens_in_brackets = unsafe { SendMessageW(item(S_MARKING), CB_GETCURSEL, 0, 0) } != 1;
     cfg.address = get_text(item(S_ADDRESS)).trim().to_string();
     cfg.contact = get_text(item(S_CONTACT)).trim().to_string();
     cfg.warning = get_text(item(S_WARNING)).trim().to_string();
@@ -1015,7 +1026,8 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                             message_box(hwnd, &e, MB_ICONWARNING);
                         }
                         let path_changed = with(|a| {
-                            let changed = a.cfg.spreadsheet != cfg.spreadsheet;
+                            let changed = a.cfg.spreadsheet != cfg.spreadsheet
+                                || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets;
                             a.cfg = cfg;
                             changed
                         })

@@ -29,6 +29,8 @@ pub struct Config {
     pub contact: String,
     /// Cross-contamination warning printed at the very bottom; empty for none.
     pub warning: String,
+    /// true = text in (brackets) is the allergen; false = bold text in the spreadsheet.
+    pub allergens_in_brackets: bool,
     /// Best before = day printed + this many days. 0 = don't print a date.
     pub best_before_days: u32,
 }
@@ -51,6 +53,7 @@ impl Default for Config {
             contact: "amy@poffles.co.uk".into(),
             warning: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination.".into(),
             best_before_days: 3,
+            allergens_in_brackets: true,
         }
     }
 }
@@ -68,6 +71,14 @@ fn config_path() -> PathBuf {
 }
 
 impl Config {
+    pub fn marking(&self) -> crate::xlsx::Marking {
+        if self.allergens_in_brackets {
+            crate::xlsx::Marking::Brackets
+        } else {
+            crate::xlsx::Marking::Bold
+        }
+    }
+
     pub fn load() -> Config {
         std::fs::read_to_string(config_path())
             .ok()

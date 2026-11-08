@@ -44,7 +44,16 @@ struct RawRun {
 
 type Zip = zip::ZipArchive<Cursor<Vec<u8>>>;
 
-pub fn read_products(path: &Path) -> Result<Vec<Product>, String> {
+/// How allergens are marked in the spreadsheet.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Marking {
+    /// Text inside (round brackets) is the allergen; spreadsheet bold is ignored.
+    Brackets,
+    /// Bold text in the spreadsheet is the allergen.
+    Bold,
+}
+
+pub fn read_products(path: &Path, marking: Marking) -> Result<Vec<Product>, String> {
     // Read the whole file up front so we hold it for as short a time as possible
     // (it may be open in Excel on the same PC or a shared drive).
     let bytes = std::fs::read(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
@@ -59,7 +68,32 @@ pub fn read_products(path: &Path) -> Result<Vec<Product>, String> {
     };
     let sheet = entry(&mut zip, &sheet_path).ok_or_else(|| format!("worksheet {sheet_path} is missing"))?;
     let cells = parse_sheet(&sheet, &shared, &xf_bold)?;
-    Ok(build_products(cells))
+    Ok(build_products(cells, marking))
+}
+
+/// Re-marks a cell so only text inside brackets is bold (the brackets
+/// themselves stay regular). Handles nesting and unclosed brackets.
+pub fn bracket_runs(runs: &[Run]) -> Vec<Run> {
+    let mut out: Vec<Run> = Vec::new();
+    let mut depth = 0u32;
+    for ch in runs.iter().flat_map(|r| r.text.chars()) {
+        let bold = match ch {
+            '(' => {
+                depth += 1;
+                false
+            }
+            ')' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            _ => depth > 0,
+        };
+        match out.last_mut() {
+            Some(last) if last.bold == bold => last.text.push(ch),
+            _ => out.push(Run { text: ch.to_string(), bold }),
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -400,7 +434,7 @@ fn plain(runs: &[Run]) -> String {
     runs.iter().map(|r| r.text.as_str()).collect()
 }
 
-fn build_products(cells: Vec<Cell>) -> Vec<Product> {
+fn build_products(cells: Vec<Cell>, marking: Marking) -> Vec<Product> {
     let Some(header_row) = cells.iter().map(|c| c.row).min() else { return Vec::new() };
     let mut cols: BTreeMap<u32, Product> = BTreeMap::new();
     for c in cells.iter().filter(|c| c.row == header_row) {
@@ -416,7 +450,10 @@ fn build_products(cells: Vec<Cell>) -> Vec<Product> {
                         p.shelf_life_days = days;
                     }
                 }
-                None => p.ingredients.push(c.runs.clone()),
+                None => p.ingredients.push(match marking {
+                    Marking::Brackets => bracket_runs(&c.runs),
+                    Marking::Bold => c.runs.clone(),
+                }),
             }
         }
     }
@@ -436,6 +473,16 @@ mod tests {
     }
 
     #[test]
+    fn brackets() {
+        let r = |t: &str, b: bool| Run { text: t.into(), bold: b };
+        let out = bracket_runs(&[r("Butter (milk)", true)]);
+        assert_eq!(out, vec![r("Butter (", false), r("milk", true), r(")", false)]);
+        let out = bracket_runs(&[r("Chips (milk, soya (lecithin))", false)]);
+        assert_eq!(out, vec![r("Chips (", false), r("milk, soya ", true), r("(", false), r("lecithin", true), r("))", false)]);
+        assert_eq!(bracket_runs(&[r("Sugar", true)]), vec![r("Sugar", false)]);
+    }
+
+    #[test]
     fn refs() {
         assert_eq!(cell_ref("A1"), Some((1, 1)));
         assert_eq!(cell_ref("AB12"), Some((28, 12)));
@@ -447,7 +494,7 @@ mod tests {
         if !p.exists() {
             return;
         }
-        let products = read_products(&p).unwrap();
+        let products = read_products(&p, Marking::Brackets).unwrap();
         for pr in &products {
             println!("== {}", pr.name);
             for ing in &pr.ingredients {
@@ -460,10 +507,12 @@ mod tests {
         assert_eq!(products[0].shelf_life_days, Some(2));
         assert_eq!(products[4].shelf_life_days, Some(7));
         assert_eq!(products[1].name, "Chocolate Brownie");
-        assert!(products[0].ingredients[0][0].bold); // Wheat flour
-        assert!(!products[0].ingredients[2][0].bold); // Caster sugar
-        let rich = &products[1].ingredients[6];
-        assert!(rich.iter().any(|r| r.bold && r.text == "soya"));
-        assert!(rich.iter().any(|r| !r.bold && r.text.starts_with("Milk chocolate")));
+        // "Flour (wheat)": only "wheat" bold
+        let flour = &products[0].ingredients[0];
+        assert!(flour.iter().any(|r| r.bold && r.text == "wheat"));
+        assert!(flour.iter().any(|r| !r.bold && r.text.starts_with("Flour")));
+        assert!(products[0].ingredients[2].iter().all(|r| !r.bold)); // Caster sugar
+        let chips = &products[1].ingredients[6];
+        assert!(chips.iter().any(|r| r.bold && r.text == "milk, soya"));
     }
 }

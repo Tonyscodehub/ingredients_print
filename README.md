@@ -10,7 +10,8 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 - **Row 1:** one product name per column. Each one becomes a button.
 - **Shelf life (optional):** a cell reading "Shelf life: 3 days" in a product's column sets that product's best before date (days after printing). Put it in row 2 to keep things tidy. It's never printed as an ingredient. Products without one use the default from Settings.
 - **Rows below:** one ingredient per cell. Blank cells are skipped.
-- **Bold = allergen.** Bold a whole cell, or just a word inside a cell (e.g. only *soya* in "emulsifier: soya lecithin"). Either way, it prints bold.
+- **Allergens go in brackets.** Write e.g. `Butter (milk)` or `Milk chocolate chips (milk, soya)`. Only the text inside the brackets prints in bold: Butter (**milk**). Bold formatting in the spreadsheet is ignored.
+- If you'd rather mark allergens by making text bold in the spreadsheet, switch "Allergens are" in Settings to "Bold text in the spreadsheet".
 - To add a product, fill in the next empty column. To remove one, delete its column.
 
 `examples/Products.xlsx` is an example with six products, plus a "Read me" sheet explaining the above.
@@ -31,7 +32,7 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 
 ## What a label looks like
 
-From top to bottom: the product name, "Ingredients:" with allergens in bold, the footer line, the best before date, the business name, address and contact, and the cross-contamination warning.
+From top to bottom: the product name, "Ingredients:" with the bracketed allergens in bold, the footer line, the best before date, the business name, address and contact, and the cross-contamination warning.
 
 The default warning reads: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination." The Food Standards Agency recommends that "may contain" style warnings name the specific allergens at risk (e.g. "may contain tree nuts") and are based on a risk assessment, so adjust it in Settings to suit the kitchen.
 
@@ -44,6 +45,7 @@ The default warning reads: "Made in a kitchen that handles a range of ingredient
 | Label width (mm) | Used for the on-screen preview (72 mm suits 80 mm paper) |
 | Extra side margin (mm) | Added inside the printer's own margins |
 | Font, sizes | Product name and ingredient text sizes in points |
+| Allergens are | Text in (brackets) (default), or bold text in the spreadsheet |
 | Ingredient layout | "Ingredients: a, **b**, c." like a UK food label, or one per line |
 | Footer text | Optional line under the ingredients, e.g. "Allergens are shown in bold." Leave blank for none |
 | Business name, Address, Contact | Printed centred near the bottom of every label (PoFfles, the Mansfield address, and amy@poffles.co.uk by default). Clear any to leave it off |
