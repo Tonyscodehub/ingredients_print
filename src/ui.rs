@@ -36,6 +36,11 @@ const S_LAYOUT: i32 = 2009;
 const S_REFRESH: i32 = 2010;
 const S_FOOTER: i32 = 2011;
 const S_TEST: i32 = 2012;
+const S_BUSINESS: i32 = 2013;
+const S_CONTACT: i32 = 2014;
+const S_BESTBEFORE: i32 = 2015;
+const S_ADDRESS: i32 = 2016;
+const S_WARNING: i32 = 2017;
 
 const TIMER_POLL: usize = 1;
 const WM_APP_STATUS: u32 = WM_APP + 1;
@@ -286,15 +291,17 @@ fn reload(manual: bool) {
                 a.last_mtime = mtime;
                 a.last_load = Instant::now();
                 let changed = a.products != ps;
+                let first = a.products.is_empty();
                 if changed {
                     a.products = ps;
                     if let Some(pp) = &a.preview_product {
                         a.preview_product = a.products.iter().find(|p| p.name == pp.name).cloned();
                     }
                 }
-                changed
+                (changed, first)
             })
-            .unwrap_or(false);
+            .unwrap_or((false, true));
+            let (changed, first) = changed;
             if changed {
                 rebuild_buttons();
                 invalidate_preview();
@@ -303,7 +310,7 @@ fn reload(manual: bool) {
                 "{n} product{} loaded from {file} at {}{}",
                 if n == 1 { "" } else { "s" },
                 now_hhmm(),
-                if changed && !manual { " – updated" } else { "" }
+                if changed && !manual && !first { " – updated" } else { "" }
             ));
         }
         Err(e) => {
@@ -765,7 +772,7 @@ fn open_settings() {
         }
         let cls = wide("AllergenSettings");
         let title = wide("Settings");
-        let (w, h) = (s(660), s(470));
+        let (w, h) = (s(660), s(670));
         let mut mr: RECT = std::mem::zeroed();
         GetWindowRect(main, &mut mr);
         let x = mr.left + ((mr.right - mr.left) - w) / 2;
@@ -858,6 +865,32 @@ fn open_settings() {
 
         label("Footer text (optional):", lx, y, lw);
         place(S_FOOTER, "EDIT", &cfg.footer, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
+        y += step;
+
+        label("Business name:", lx, y, lw);
+        place(S_BUSINESS, "EDIT", &cfg.business_name, edit, WS_EX_CLIENTEDGE, cx, y, s(200), rh);
+        y += step;
+
+        label("Address:", lx, y, lw);
+        place(S_ADDRESS, "EDIT", &cfg.address, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
+        y += step;
+
+        label("Contact:", lx, y, lw);
+        place(S_CONTACT, "EDIT", &cfg.contact, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
+        y += step;
+
+        label("Best before:", lx, y, lw);
+        let bb = place(S_BESTBEFORE, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, cx, y + s(2), s(110), s(300));
+        for d in 1..=10 {
+            let t = wide(&format!("{d} day{}", if d == 1 { "" } else { "s" }));
+            SendMessageW(bb, CB_ADDSTRING, 0, t.as_ptr() as isize);
+        }
+        SendMessageW(bb, CB_SETCURSEL, (cfg.best_before_days.clamp(1, 10) - 1) as usize, 0);
+        label("after the day the label is printed.", cx + s(120), y, s(300));
+        y += step;
+
+        label("Warning (bottom of label):", lx, y, lw);
+        place(S_WARNING, "EDIT", &cfg.warning, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
 
         let by = h - s(100);
         place(S_TEST, "BUTTON", "Print test label", WS_TABSTOP, 0, lx, by, s(150), s(34));
@@ -922,6 +955,11 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
     cfg.one_per_line = unsafe { SendMessageW(item(S_LAYOUT), CB_GETCURSEL, 0, 0) } == 1;
     cfg.refresh_minutes = num(S_REFRESH, "Refresh interval", 1.0, 1440.0)? as u32;
     cfg.footer = get_text(item(S_FOOTER)).trim().to_string();
+    cfg.business_name = get_text(item(S_BUSINESS)).trim().to_string();
+    cfg.address = get_text(item(S_ADDRESS)).trim().to_string();
+    cfg.contact = get_text(item(S_CONTACT)).trim().to_string();
+    cfg.warning = get_text(item(S_WARNING)).trim().to_string();
+    cfg.best_before_days = unsafe { SendMessageW(item(S_BESTBEFORE), CB_GETCURSEL, 0, 0) }.clamp(0, 9) as u32 + 1;
     Ok(cfg)
 }
 

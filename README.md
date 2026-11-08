@@ -28,6 +28,12 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 - New products get new buttons, and the buttons resize to fit the window. When there are too many to fit at a usable size, a scroll bar appears (mouse wheel works too).
 - If the file can't be read (for example, mid-save), the app keeps the last good list and tries again.
 
+## What a label looks like
+
+From top to bottom: the product name, "Ingredients:" with allergens in bold, the footer line, the best before date, the business name, address and contact, and the cross-contamination warning.
+
+The default warning reads: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination." The Food Standards Agency recommends that "may contain" style warnings name the specific allergens at risk (e.g. "may contain tree nuts") and are based on a risk assessment, so adjust it in Settings to suit the kitchen.
+
 ## Settings
 
 | Setting | What it does |
@@ -38,7 +44,10 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 | Extra side margin (mm) | Added inside the printer's own margins |
 | Font, sizes | Product name and ingredient text sizes in points |
 | Ingredient layout | "Ingredients: a, **b**, c." like a UK food label, or one per line |
-| Footer text | Optional line at the bottom, e.g. "Allergens are shown in bold." Leave blank for none |
+| Footer text | Optional line under the ingredients, e.g. "Allergens are shown in bold." Leave blank for none |
+| Business name, Address, Contact | Printed centred near the bottom of every label (PoFfles, the Mansfield address, and amy@poffles.co.uk by default). Clear any to leave it off |
+| Best before | 1–10 days after the day the label is printed (default 3), shown as e.g. "Best before: 11 Nov 2026" |
+| Warning | Cross-contamination sentence printed at the very bottom |
 | Print test label | Prints the first product using the settings on screen, before you save |
 
 Settings are saved in `%APPDATA%\AllergenLabels\settings.json`.

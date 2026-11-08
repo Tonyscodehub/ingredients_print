@@ -8,6 +8,21 @@ use windows_sys::Win32::Foundation::SIZE;
 use windows_sys::Win32::Graphics::Gdi::*;
 use windows_sys::Win32::Graphics::Printing::*;
 use windows_sys::Win32::Storage::Xps::*;
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+
+/// "Best before: 11 Nov 2026" (today + configured days), or None if switched off.
+pub fn best_before_text(cfg: &Config) -> Option<String> {
+    if cfg.best_before_days == 0 {
+        return None;
+    }
+    let st = unsafe {
+        let mut st = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        st
+    };
+    let d = crate::date::add_days_formatted(st.wYear as i32, st.wMonth as u32, st.wDay as u32, cfg.best_before_days as i64);
+    Some(format!("Best before: {d}"))
+}
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -226,6 +241,33 @@ pub fn layout(hdc: HDC, fonts: &Fonts, width: i32, product: &Product, cfg: &Conf
             last.3 = 0.35;
         }
         paras.push((vec![(cfg.footer.trim().to_string(), FOOTER)], false, FOOTER, 0.0));
+    }
+    if let Some(bb) = best_before_text(cfg) {
+        if let Some(last) = paras.last_mut() {
+            last.3 = 0.35;
+        }
+        paras.push((vec![(bb, BOLD)], false, BODY, 0.0));
+    }
+    // Business block, centred: name (bold), address, contact.
+    let business = [(cfg.business_name.trim(), BOLD), (cfg.address.trim(), BODY), (cfg.contact.trim(), BODY)];
+    let mut first = true;
+    for (text, font) in business {
+        if text.is_empty() {
+            continue;
+        }
+        if first {
+            if let Some(last) = paras.last_mut() {
+                last.3 = 0.35;
+            }
+            first = false;
+        }
+        paras.push((vec![(text.to_string(), font)], true, font, 0.0));
+    }
+    if !cfg.warning.trim().is_empty() {
+        if let Some(last) = paras.last_mut() {
+            last.3 = 0.35;
+        }
+        paras.push((vec![(cfg.warning.trim().to_string(), FOOTER)], false, FOOTER, 0.0));
     }
 
     let mut all = Vec::new();

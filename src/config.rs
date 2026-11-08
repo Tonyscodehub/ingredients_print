@@ -21,6 +21,16 @@ pub struct Config {
     pub one_per_line: bool,
     /// Printed under the ingredients; leave empty for none.
     pub footer: String,
+    /// Business name printed at the bottom of each label; empty for none.
+    pub business_name: String,
+    /// Business address, printed under the name; empty for none.
+    pub address: String,
+    /// Contact details (email/phone) printed under the address; empty for none.
+    pub contact: String,
+    /// Cross-contamination warning printed at the very bottom; empty for none.
+    pub warning: String,
+    /// Best before = day printed + this many days. 0 = don't print a date.
+    pub best_before_days: u32,
 }
 
 impl Default for Config {
@@ -36,6 +46,11 @@ impl Default for Config {
             body_pt: 10.0,
             one_per_line: false,
             footer: "Allergens are shown in bold.".into(),
+            business_name: "PoFfles".into(),
+            address: "Grantham House, 423 Nottingham Road, Mansfield, NG18 4SU".into(),
+            contact: "amy@poffles.co.uk".into(),
+            warning: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination.".into(),
+            best_before_days: 3,
         }
     }
 }
