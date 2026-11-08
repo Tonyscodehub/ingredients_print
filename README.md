@@ -2,7 +2,7 @@
 
 A small Windows app that turns a products spreadsheet into one big button per product. Press a button and it prints the product name with its ingredients underneath, allergens in bold, on a Star TSP100III (or any Windows printer).
 
-`AllergenLabels.exe` is a single file with nothing to install. It only uses DLLs that come with Windows.
+`AllergenLabels.exe` is a single file with nothing to install. It only uses DLLs that come with Windows. A ready-built copy is in [`dist/`](dist/AllergenLabels.exe), and the sample spreadsheet is in [`examples/`](examples/Products.xlsx).
 
 ## The spreadsheet
 
