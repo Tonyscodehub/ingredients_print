@@ -21,6 +21,18 @@ pub struct Product {
     pub name: String,
     /// One entry per ingredient cell; each cell is a list of runs.
     pub ingredients: Vec<Vec<Run>>,
+    /// From a "Shelf life: N days" cell in the column, if there is one.
+    pub shelf_life_days: Option<u32>,
+}
+
+/// Recognises "Shelf life: 3 days", "shelf life 3", "Shelf-life = 10 days" etc.
+/// Returns Some(None) for a shelf-life cell with no usable number (so it's
+/// still kept off the label), None if the cell isn't a shelf-life cell.
+pub fn parse_shelf_life(text: &str) -> Option<Option<u32>> {
+    let t = text.trim().to_lowercase().replace('-', " ");
+    let rest = t.strip_prefix("shelf life")?;
+    let digits: String = rest.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
+    Some(digits.parse().ok())
 }
 
 /// A run as stored in the file: `bold == None` means "use the cell's font".
@@ -392,13 +404,20 @@ fn build_products(cells: Vec<Cell>) -> Vec<Product> {
     let Some(header_row) = cells.iter().map(|c| c.row).min() else { return Vec::new() };
     let mut cols: BTreeMap<u32, Product> = BTreeMap::new();
     for c in cells.iter().filter(|c| c.row == header_row) {
-        cols.insert(c.col, Product { name: plain(&c.runs), ingredients: Vec::new() });
+        cols.insert(c.col, Product { name: plain(&c.runs), ingredients: Vec::new(), shelf_life_days: None });
     }
     let mut body: Vec<&Cell> = cells.iter().filter(|c| c.row > header_row).collect();
     body.sort_by_key(|c| (c.col, c.row));
     for c in body {
         if let Some(p) = cols.get_mut(&c.col) {
-            p.ingredients.push(c.runs.clone());
+            match parse_shelf_life(&plain(&c.runs)) {
+                Some(days) => {
+                    if p.shelf_life_days.is_none() {
+                        p.shelf_life_days = days;
+                    }
+                }
+                None => p.ingredients.push(c.runs.clone()),
+            }
         }
     }
     cols.into_values().collect()
@@ -407,6 +426,14 @@ fn build_products(cells: Vec<Cell>) -> Vec<Product> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shelf_life() {
+        assert_eq!(parse_shelf_life("Shelf life: 3 days"), Some(Some(3)));
+        assert_eq!(parse_shelf_life("shelf-life 10"), Some(Some(10)));
+        assert_eq!(parse_shelf_life("Shelf life: tbc"), Some(None));
+        assert_eq!(parse_shelf_life("Wheat flour"), None);
+    }
 
     #[test]
     fn refs() {
@@ -430,6 +457,8 @@ mod tests {
             }
         }
         assert_eq!(products.len(), 6);
+        assert_eq!(products[0].shelf_life_days, Some(2));
+        assert_eq!(products[4].shelf_life_days, Some(7));
         assert_eq!(products[1].name, "Chocolate Brownie");
         assert!(products[0].ingredients[0][0].bold); // Wheat flour
         assert!(!products[0].ingredients[2][0].bold); // Caster sugar

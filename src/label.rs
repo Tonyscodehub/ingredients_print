@@ -10,9 +10,11 @@ use windows_sys::Win32::Graphics::Printing::*;
 use windows_sys::Win32::Storage::Xps::*;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
-/// "Best before: 11 Nov 2026" (today + configured days), or None if switched off.
-pub fn best_before_text(cfg: &Config) -> Option<String> {
-    if cfg.best_before_days == 0 {
+/// "Best before: 11 Nov 2026" (today + the product's shelf life from the
+/// spreadsheet, or the default from Settings), or None if switched off.
+pub fn best_before_text(cfg: &Config, product: &Product) -> Option<String> {
+    let days = product.shelf_life_days.unwrap_or(cfg.best_before_days);
+    if days == 0 {
         return None;
     }
     let st = unsafe {
@@ -20,7 +22,7 @@ pub fn best_before_text(cfg: &Config) -> Option<String> {
         GetLocalTime(&mut st);
         st
     };
-    let d = crate::date::add_days_formatted(st.wYear as i32, st.wMonth as u32, st.wDay as u32, cfg.best_before_days as i64);
+    let d = crate::date::add_days_formatted(st.wYear as i32, st.wMonth as u32, st.wDay as u32, days as i64);
     Some(format!("Best before: {d}"))
 }
 
@@ -242,7 +244,7 @@ pub fn layout(hdc: HDC, fonts: &Fonts, width: i32, product: &Product, cfg: &Conf
         }
         paras.push((vec![(cfg.footer.trim().to_string(), FOOTER)], false, FOOTER, 0.0));
     }
-    if let Some(bb) = best_before_text(cfg) {
+    if let Some(bb) = best_before_text(cfg, product) {
         if let Some(last) = paras.last_mut() {
             last.3 = 0.35;
         }

@@ -8,6 +8,7 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 
 - The app reads the **first sheet** of an `.xlsx` workbook.
 - **Row 1:** one product name per column. Each one becomes a button.
+- **Shelf life (optional):** a cell reading "Shelf life: 3 days" in a product's column sets that product's best before date (days after printing). Put it in row 2 to keep things tidy. It's never printed as an ingredient. Products without one use the default from Settings.
 - **Rows below:** one ingredient per cell. Blank cells are skipped.
 - **Bold = allergen.** Bold a whole cell, or just a word inside a cell (e.g. only *soya* in "emulsifier: soya lecithin"). Either way, it prints bold.
 - To add a product, fill in the next empty column. To remove one, delete its column.
@@ -46,7 +47,7 @@ The default warning reads: "Made in a kitchen that handles a range of ingredient
 | Ingredient layout | "Ingredients: a, **b**, c." like a UK food label, or one per line |
 | Footer text | Optional line under the ingredients, e.g. "Allergens are shown in bold." Leave blank for none |
 | Business name, Address, Contact | Printed centred near the bottom of every label (PoFfles, the Mansfield address, and amy@poffles.co.uk by default). Clear any to leave it off |
-| Best before | 1–10 days after the day the label is printed (default 3), shown as e.g. "Best before: 11 Nov 2026" |
+| Default best before | 1–10 days after printing (default 3), used for products with no shelf life cell in the spreadsheet |
 | Warning | Cross-contamination sentence printed at the very bottom |
 | Print test label | Prints the first product using the settings on screen, before you save |
 

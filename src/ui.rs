@@ -879,14 +879,14 @@ fn open_settings() {
         place(S_CONTACT, "EDIT", &cfg.contact, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
         y += step;
 
-        label("Best before:", lx, y, lw);
+        label("Default best before:", lx, y, lw);
         let bb = place(S_BESTBEFORE, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, cx, y + s(2), s(110), s(300));
         for d in 1..=10 {
             let t = wide(&format!("{d} day{}", if d == 1 { "" } else { "s" }));
             SendMessageW(bb, CB_ADDSTRING, 0, t.as_ptr() as isize);
         }
         SendMessageW(bb, CB_SETCURSEL, (cfg.best_before_days.clamp(1, 10) - 1) as usize, 0);
-        label("after the day the label is printed.", cx + s(120), y, s(300));
+        label("Used when the spreadsheet gives no shelf life.", cx + s(120), y, s(300));
         y += step;
 
         label("Warning (bottom of label):", lx, y, lw);
@@ -992,6 +992,7 @@ fn sample_product() -> Product {
     Product {
         name: "Test Label".into(),
         ingredients: vec![r("Wheat flour", true), r("Sugar", false), r("Butter (milk)", true), r("Free range eggs", true), r("Vanilla", false)],
+        shelf_life_days: None,
     }
 }
 
