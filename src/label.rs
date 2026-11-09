@@ -238,6 +238,9 @@ pub fn layout(hdc: HDC, fonts: &Fonts, width: i32, product: &Product, cfg: &Conf
         }
         paras.push((runs, false, BODY, 0.0));
     }
+    if let Some(m) = product.may_contain.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        paras.push((vec![("May contain: ".to_string(), BODY), (m.trim_end_matches('.').to_string() + ".", BOLD)], false, BODY, 0.0));
+    }
     if !cfg.footer.trim().is_empty() {
         if let Some(last) = paras.last_mut() {
             last.3 = 0.35;

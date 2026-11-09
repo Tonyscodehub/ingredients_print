@@ -10,6 +10,7 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 - **Row 1:** one product name per column. Each one becomes a button.
 - **Shelf life (optional):** a cell reading "Shelf life: 3 days" in a product's column sets that product's best before date (days after printing). Put it in row 2 to keep things tidy. It's never printed as an ingredient. Products without one use the default from Settings.
 - **Rows below:** one ingredient per cell. Blank cells are skipped.
+- **Bought-in products:** instead of ingredients, put `Barcode: 5010251703129` in a cell and the shop name in the cell below (e.g. `Morrisons`). See below.
 - **Allergens go in brackets.** Write e.g. `Butter (milk)` or `Milk chocolate chips (milk, soya)`. Only the text inside the brackets prints in bold: Butter (**milk**). Bold formatting in the spreadsheet is ignored.
 - If you'd rather mark allergens by making text bold in the spreadsheet, switch "Allergens are" in Settings to "Bold text in the spreadsheet".
 - To add a product, fill in the next empty column. To remove one, delete its column.
@@ -35,6 +36,25 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 From top to bottom: the product name, "Ingredients:" with the bracketed allergens in bold, the footer line, the best before date, the business name, address and contact, and the cross-contamination warning.
 
 The default warning reads: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination." The Food Standards Agency recommends that "may contain" style warnings name the specific allergens at risk (e.g. "may contain tree nuts") and are based on a risk assessment, so adjust it in Settings to suit the kitchen.
+
+## Bought-in products (barcode lookup)
+
+For things you buy in and resell, the column only needs the product name, an optional shelf life, the barcode, and the shop:
+
+| Shortbread Fingers |
+|---|
+| Shelf life: 10 days |
+| Barcode: 5010251703129 |
+| Morrisons |
+
+1. The button shows "(check ingredients)" until someone has checked it. Pressing it opens the checking screen instead of printing.
+2. The app looks the barcode up on [Open Food Facts](https://world.openfoodfacts.org) (a free, community-run product database). It fills in the ingredients with allergens marked by \*asterisks\*, plus the pack's "may contain" warning, and shows the product name it found so you can confirm it's the right item.
+3. Check every word against the pack, fix anything that's wrong or missing (if nothing is found, type it from the pack), and press **Accept and save**. From then on the button prints straight away, without going online.
+4. To look at or re-check a bought-in product later (e.g. after a recipe change), **right-click** its button.
+
+The shop and the manufacturer/brand are never printed on the label. Checked details are kept in `%APPDATA%\AllergenLabels\checked_products.json`, by barcode, so changing a product's barcode means it has to be checked again.
+
+Online information can be wrong, incomplete, or out of date, and the pack is the legal source of ingredient and allergen information, which is why nothing prints until a person has checked it.
 
 ## Settings
 

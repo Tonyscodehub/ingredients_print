@@ -2,8 +2,11 @@
 
 mod config;
 mod date;
+mod lookup;
 mod xlsx;
 
+#[cfg(windows)]
+mod http;
 #[cfg(windows)]
 mod label;
 #[cfg(windows)]

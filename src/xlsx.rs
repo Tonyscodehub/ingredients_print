@@ -10,19 +10,62 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Run {
     pub text: String,
     pub bold: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Product {
     pub name: String,
     /// One entry per ingredient cell; each cell is a list of runs.
     pub ingredients: Vec<Vec<Run>>,
     /// From a "Shelf life: N days" cell in the column, if there is one.
     pub shelf_life_days: Option<u32>,
+    /// Bought-in product: barcode from a "Barcode: …" cell.
+    pub barcode: Option<String>,
+    /// Shop named in the cell below the barcode. Never printed.
+    pub store: Option<String>,
+    /// "May contain" text from the checked pack details.
+    pub may_contain: Option<String>,
+    /// Bought-in product whose looked-up details haven't been checked yet.
+    pub needs_check: bool,
+}
+
+/// "Barcode: 5010251703129", or a cell that is just an 8–14 digit number.
+pub fn parse_barcode(text: &str) -> Option<String> {
+    let t = text.trim();
+    let lower = t.to_lowercase();
+    let (rest, labelled) = match lower.strip_prefix("barcode") {
+        Some(_) => (&t["barcode".len()..], true),
+        None => (t, false),
+    };
+    let rest = rest.trim_start_matches([':', ' ', '=', '-']);
+    let mut digits: String = rest.chars().filter(|c| !c.is_whitespace() && *c != '-').collect();
+    // A number Excel wrote in scientific notation (e.g. 5.01025170313E+12).
+    if digits.contains(['E', 'e']) {
+        if let Ok(f) = digits.parse::<f64>() {
+            digits = format!("{f:.0}");
+        }
+    }
+    let ok = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
+    if labelled {
+        return ok.then_some(digits).or(Some(String::new()));
+    }
+    (ok && (8..=14).contains(&digits.len())).then_some(digits)
+}
+
+fn strip_store_label(t: &str) -> String {
+    let lower = t.to_lowercase();
+    for p in ["store", "shop", "from", "supplier"] {
+        if let Some(rest) = lower.strip_prefix(p) {
+            if rest.starts_with([':', ' ', '=']) {
+                return t[p.len()..].trim_start_matches([':', ' ', '=']).trim().to_string();
+            }
+        }
+    }
+    t.trim().to_string()
 }
 
 /// Recognises "Shelf life: 3 days", "shelf life 3", "Shelf-life = 10 days" etc.
@@ -438,13 +481,26 @@ fn build_products(cells: Vec<Cell>, marking: Marking) -> Vec<Product> {
     let Some(header_row) = cells.iter().map(|c| c.row).min() else { return Vec::new() };
     let mut cols: BTreeMap<u32, Product> = BTreeMap::new();
     for c in cells.iter().filter(|c| c.row == header_row) {
-        cols.insert(c.col, Product { name: plain(&c.runs), ingredients: Vec::new(), shelf_life_days: None });
+        cols.insert(c.col, Product { name: plain(&c.runs), ..Default::default() });
     }
     let mut body: Vec<&Cell> = cells.iter().filter(|c| c.row > header_row).collect();
     body.sort_by_key(|c| (c.col, c.row));
+    let mut store_at: Option<(u32, u32)> = None; // (col, row) of the cell under a barcode
     for c in body {
         if let Some(p) = cols.get_mut(&c.col) {
-            match parse_shelf_life(&plain(&c.runs)) {
+            let text = plain(&c.runs);
+            if store_at == Some((c.col, c.row)) {
+                p.store = Some(strip_store_label(&text));
+                continue;
+            }
+            if let Some(bc) = parse_barcode(&text) {
+                if p.barcode.is_none() && !bc.is_empty() {
+                    p.barcode = Some(bc);
+                    store_at = Some((c.col, c.row + 1));
+                }
+                continue;
+            }
+            match parse_shelf_life(&text) {
                 Some(days) => {
                     if p.shelf_life_days.is_none() {
                         p.shelf_life_days = days;
@@ -457,7 +513,12 @@ fn build_products(cells: Vec<Cell>, marking: Marking) -> Vec<Product> {
             }
         }
     }
-    cols.into_values().collect()
+    let mut out: Vec<Product> = cols.into_values().collect();
+    for p in out.iter_mut().filter(|p| p.barcode.is_some()) {
+        p.ingredients.clear();
+        p.needs_check = true;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -483,6 +544,18 @@ mod tests {
     }
 
     #[test]
+    fn barcodes() {
+        assert_eq!(parse_barcode("Barcode: 5010251703129").as_deref(), Some("5010251703129"));
+        assert_eq!(parse_barcode("barcode 5010 2517 03129").as_deref(), Some("5010251703129"));
+        assert_eq!(parse_barcode("5010251703129").as_deref(), Some("5010251703129"));
+        assert_eq!(parse_barcode("5.010251703129E+12").as_deref(), Some("5010251703129"));
+        assert_eq!(parse_barcode("Sugar"), None);
+        assert_eq!(parse_barcode("250"), None);
+        assert_eq!(strip_store_label("Store: Tesco"), "Tesco");
+        assert_eq!(strip_store_label("Sainsbury's"), "Sainsbury's");
+    }
+
+    #[test]
     fn refs() {
         assert_eq!(cell_ref("A1"), Some((1, 1)));
         assert_eq!(cell_ref("AB12"), Some((28, 12)));
@@ -503,7 +576,11 @@ mod tests {
                 println!("   {s}");
             }
         }
-        assert_eq!(products.len(), 6);
+        assert_eq!(products.len(), 7);
+        let bought = &products[6];
+        assert_eq!(bought.barcode.as_deref(), Some("5010251703129"));
+        assert_eq!(bought.store.as_deref(), Some("Morrisons"));
+        assert!(bought.ingredients.is_empty());
         assert_eq!(products[0].shelf_life_days, Some(2));
         assert_eq!(products[4].shelf_life_days, Some(7));
         assert_eq!(products[1].name, "Chocolate Brownie");

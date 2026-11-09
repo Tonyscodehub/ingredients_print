@@ -2,6 +2,7 @@
 
 use crate::config::Config;
 use crate::label::{self, wide};
+use crate::lookup::{self, Found};
 use crate::xlsx::{self, Product, Run};
 use std::cell::RefCell;
 use std::path::Path;
@@ -14,7 +15,8 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, SetFocus};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const APP_TITLE: &str = "Allergen Label Printer";
@@ -45,6 +47,14 @@ const S_MARKING: i32 = 2018;
 
 const TIMER_POLL: usize = 1;
 const WM_APP_STATUS: u32 = WM_APP + 1;
+const WM_APP_LOOKUP: u32 = WM_APP + 2;
+const WM_APP_RECHECK: u32 = WM_APP + 3;
+
+const C_INFO: i32 = 3001;
+const C_FOUND: i32 = 3002;
+const C_ING: i32 = 3003;
+const C_MAY: i32 = 3004;
+const C_RELOOK: i32 = 3005;
 
 // Static control styles (kept local; windows-sys files them under SystemServices).
 const SS_LEFT: u32 = 0x0;
@@ -81,6 +91,9 @@ struct App {
     last_load: Instant,
     settings: HWND,
     in_layout: bool,
+    check: HWND,
+    check_product: Option<Product>,
+    check_found_name: String,
 }
 
 thread_local! {
@@ -164,6 +177,7 @@ pub fn run() {
             ("AllergenHost", host_proc),
             ("AllergenPreview", preview_proc),
             ("AllergenSettings", settings_proc),
+            ("AllergenCheck", check_proc),
         ] {
             let n = wide(name);
             let wc = WNDCLASSEXW {
@@ -213,6 +227,9 @@ pub fn run() {
                 last_load: Instant::now(),
                 settings: null_mut(),
                 in_layout: false,
+                check: null_mut(),
+                check_product: None,
+                check_found_name: String::new(),
             })
         });
 
@@ -264,8 +281,11 @@ pub fn run() {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            let settings = with(|a| a.settings).unwrap_or(null_mut());
+            let (settings, check) = with(|a| (a.settings, a.check)).unwrap_or((null_mut(), null_mut()));
             if !settings.is_null() && IsDialogMessageW(settings, &msg) != 0 {
+                continue;
+            }
+            if !check.is_null() && IsDialogMessageW(check, &msg) != 0 {
                 continue;
             }
             if IsDialogMessageW(main, &msg) != 0 {
@@ -286,8 +306,9 @@ fn reload(manual: bool) {
     let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let file = p.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or(path.clone());
     match xlsx::read_products(p, marking) {
-        Ok(ps) => {
+        Ok(mut ps) => {
             let n = ps.len();
+            let unchecked = apply_checked(&mut ps);
             let changed = with(|a| {
                 a.last_mtime = mtime;
                 a.last_load = Instant::now();
@@ -308,10 +329,15 @@ fn reload(manual: bool) {
                 invalidate_preview();
             }
             set_status(&format!(
-                "{n} product{} loaded from {file} at {}{}",
+                "{n} product{} loaded from {file} at {}{}{}",
                 if n == 1 { "" } else { "s" },
                 now_hhmm(),
-                if changed && !manual && !first { " – updated" } else { "" }
+                if changed && !manual && !first { " – updated" } else { "" },
+                match unchecked {
+                    0 => String::new(),
+                    1 => " – 1 bought-in product needs checking before it can print".into(),
+                    k => format!(" – {k} bought-in products need checking before they can print"),
+                }
             ));
         }
         Err(e) => {
@@ -375,7 +401,12 @@ fn layout_main() {
 
 fn rebuild_buttons() {
     let Some((old, host, names, font)) = with(|a| {
-        (std::mem::take(&mut a.buttons), a.host, a.products.iter().map(|p| p.name.clone()).collect::<Vec<_>>(), a.btn_font)
+        let names = a
+            .products
+            .iter()
+            .map(|p| if p.needs_check { format!("{}\n(check ingredients)", p.name) } else { p.name.clone() })
+            .collect::<Vec<_>>();
+        (std::mem::take(&mut a.buttons), a.host, names, a.btn_font)
     }) else {
         return;
     };
@@ -385,8 +416,15 @@ fn rebuild_buttons() {
         }
     }
     let style = WS_TABSTOP | (BS_PUSHBUTTON | BS_MULTILINE | BS_CENTER | BS_VCENTER) as u32;
-    let new: Vec<HWND> =
-        names.iter().enumerate().map(|(i, n)| child("BUTTON", &n.replace('&', "&&"), style, 0, host, ID_PRODUCT + i, font)).collect();
+    let new: Vec<HWND> = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let b = child("BUTTON", &n.replace('&', "&&"), style, 0, host, ID_PRODUCT + i, font);
+            unsafe { SetWindowSubclass(b, Some(button_subclass), 1, i) };
+            b
+        })
+        .collect();
     with(|a| {
         a.buttons = new;
         a.scroll = 0;
@@ -584,6 +622,10 @@ fn spawn_print(product: Product, cfg: Config, copies: u32) {
 fn on_product(idx: usize) {
     let Some((p, cfg, copies_h)) = with(|a| (a.products.get(idx).cloned(), a.cfg.clone(), a.copies)) else { return };
     let Some(p) = p else { return };
+    if p.needs_check {
+        open_check(idx);
+        return;
+    }
     let copies = unsafe { SendMessageW(copies_h, CB_GETCURSEL, 0, 0) }.max(0) as u32 + 1;
     with(|a| a.preview_product = Some(p.clone()));
     invalidate_preview();
@@ -622,6 +664,15 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             if wp != 0 {
                 message_box(hwnd, &b, MB_ICONERROR);
             }
+            0
+        }
+        WM_APP_LOOKUP => {
+            let b = Box::from_raw(lp as *mut (String, Result<Option<Found>, String>));
+            on_lookup_result(b.0, b.1);
+            0
+        }
+        WM_APP_RECHECK => {
+            open_check(wp);
             0
         }
         WM_MOUSEWHEEL => {
@@ -1003,7 +1054,7 @@ fn sample_product() -> Product {
     Product {
         name: "Test Label".into(),
         ingredients: vec![r("Wheat flour", true), r("Sugar", false), r("Butter (milk)", true), r("Free range eggs", true), r("Vanilla", false)],
-        shelf_life_days: None,
+        ..Default::default()
     }
 }
 
@@ -1052,6 +1103,294 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
         }
         WM_CLOSE => {
             close_settings();
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bought-in products: barcode lookup and checking
+
+/// Fills in checked details for bought-in products. Returns how many still need checking.
+fn apply_checked(ps: &mut [Product]) -> usize {
+    let store = lookup::Store::load();
+    let mut unchecked = 0;
+    for p in ps.iter_mut() {
+        let Some(bc) = p.barcode.clone() else { continue };
+        match store.products.get(&bc) {
+            Some(c) if !c.ingredients.trim().is_empty() => {
+                p.ingredients = vec![lookup::marked_to_runs(&c.ingredients)];
+                p.may_contain = Some(c.may_contain.clone()).filter(|m| !m.trim().is_empty());
+                p.needs_check = false;
+            }
+            _ => unchecked += 1,
+        }
+    }
+    unchecked
+}
+
+unsafe extern "system" fn button_subclass(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, idx: usize) -> LRESULT {
+    if msg == WM_RBUTTONUP {
+        // Right-click a bought-in product to look at / re-check its details.
+        if let Some(m) = with(|a| a.main) {
+            PostMessageW(m, WM_APP_RECHECK, idx, 0);
+        }
+        return 0;
+    }
+    DefSubclassProc(h, msg, wp, lp)
+}
+
+/// Makes Tab / Shift+Tab leave a multi-line box instead of being swallowed.
+unsafe extern "system" fn tab_moves_focus(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _d: usize) -> LRESULT {
+    const VK_TAB: usize = 9;
+    match msg {
+        WM_GETDLGCODE => {
+            let mut r = DefSubclassProc(h, msg, wp, lp);
+            if lp != 0 {
+                let m = &*(lp as *const MSG);
+                if m.message == WM_KEYDOWN && m.wParam == VK_TAB {
+                    r &= !((DLGC_WANTALLKEYS | DLGC_WANTMESSAGE | DLGC_WANTTAB) as isize);
+                }
+            }
+            r
+        }
+        WM_KEYDOWN if wp == VK_TAB => {
+            let back = (GetKeyState(0x10 /* VK_SHIFT */) as u16 & 0x8000) != 0;
+            let next = GetNextDlgTabItem(GetParent(h), h, back as i32);
+            if !next.is_null() {
+                SetFocus(next);
+            }
+            0
+        }
+        WM_CHAR if wp == VK_TAB => 0,
+        _ => DefSubclassProc(h, msg, wp, lp),
+    }
+}
+
+fn today() -> String {
+    unsafe {
+        let mut st: SYSTEMTIME = std::mem::zeroed();
+        GetLocalTime(&mut st);
+        crate::date::add_days_formatted(st.wYear as i32, st.wMonth as u32, st.wDay as u32, 0)
+    }
+}
+
+fn start_lookup(barcode: String) {
+    let Some(main) = with(|a| a.main) else { return };
+    let main = main as usize;
+    std::thread::spawn(move || {
+        let res = crate::http::lookup_barcode(&barcode);
+        let b = Box::into_raw(Box::new((barcode, res)));
+        unsafe {
+            if PostMessageW(main as HWND, WM_APP_LOOKUP, 0, b as isize) == 0 {
+                drop(Box::from_raw(b));
+            }
+        }
+    });
+}
+
+fn open_check(idx: usize) {
+    let Some((existing, main, product, font, hinst)) =
+        with(|a| (a.check, a.main, a.products.get(idx).cloned(), a.ui_font, a.hinst))
+    else {
+        return;
+    };
+    let Some(product) = product else { return };
+    let Some(barcode) = product.barcode.clone() else { return };
+    unsafe {
+        if !existing.is_null() {
+            SetForegroundWindow(existing);
+            return;
+        }
+        let cls = wide("AllergenCheck");
+        let title = wide("Check bought-in product");
+        let (w, h) = (s(720), s(600));
+        let mut mr: RECT = std::mem::zeroed();
+        GetWindowRect(main, &mut mr);
+        let x = mr.left + ((mr.right - mr.left) - w) / 2;
+        let y = mr.top + ((mr.bottom - mr.top) - h) / 2;
+        let wnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+            cls.as_ptr(),
+            title.as_ptr(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            x.max(0),
+            y.max(0),
+            w,
+            h,
+            main,
+            null_mut(),
+            hinst,
+            null(),
+        );
+        let checked = lookup::Store::load().products.get(&barcode).cloned();
+        with(|a| {
+            a.check = wnd;
+            a.check_product = Some(product.clone());
+            a.check_found_name = checked.as_ref().map(|c| c.found_name.clone()).unwrap_or_default();
+        });
+
+        let lx = s(16);
+        let cw = w - s(48);
+        let put = |id: i32, class: &str, text: &str, style: u32, ex: u32, y: i32, hh: i32| {
+            let c = child(class, text, style, ex, wnd, id as usize, font);
+            MoveWindow(c, lx, y, cw, hh, 0);
+            c
+        };
+        let mut y = s(14);
+        let store = product.store.clone().filter(|s| !s.is_empty()).map(|s| format!(" – bought from {s}")).unwrap_or_default();
+        put(C_INFO, "STATIC", &format!("{}\r\nBarcode {barcode}{store}", product.name), SS_LEFT, 0, y, s(44));
+        y += s(50);
+        let found_text = match &checked {
+            Some(c) => format!(
+                "Checked on {}.{} Press Look up again to fetch the latest details.",
+                c.checked_on,
+                if c.found_name.is_empty() { String::new() } else { format!(" Found online as: {}.", c.found_name) }
+            ),
+            None => "Looking up this barcode on Open Food Facts…".into(),
+        };
+        put(C_FOUND, "STATIC", &found_text, SS_LEFT, 0, y, s(44));
+        y += s(52);
+        put(0, "STATIC", "Ingredients – put *asterisks* around each allergen, matching the bold words on the pack:", SS_LEFT, 0, y, s(24));
+        y += s(26);
+        let ml = WS_TABSTOP | WS_VSCROLL | (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32;
+        let ing = put(C_ING, "EDIT", checked.as_ref().map(|c| c.ingredients.as_str()).unwrap_or(""), ml, WS_EX_CLIENTEDGE, y, s(180));
+        SetWindowSubclass(ing, Some(tab_moves_focus), 2, 0);
+        y += s(192);
+        put(0, "STATIC", "May contain (from the pack's warning, if it has one):", SS_LEFT, 0, y, s(24));
+        y += s(26);
+        put(C_MAY, "EDIT", checked.as_ref().map(|c| c.may_contain.as_str()).unwrap_or(""), WS_TABSTOP | ES_AUTOHSCROLL as u32, WS_EX_CLIENTEDGE, y, s(26));
+        y += s(40);
+        put(
+            0,
+            "STATIC",
+            "Check every word against the pack before accepting – online information can be wrong or out of date, and recipes change. The shop and manufacturer are never printed on the label.",
+            SS_LEFT,
+            0,
+            y,
+            s(44),
+        );
+
+        let by = h - s(96);
+        let b = child("BUTTON", "Look up again", WS_TABSTOP, 0, wnd, C_RELOOK as usize, font);
+        MoveWindow(b, lx, by, s(150), s(34), 0);
+        let b = child("BUTTON", "Accept and save", WS_TABSTOP, 0, wnd, IDOK as usize, font);
+        MoveWindow(b, w - s(310), by, s(160), s(34), 0);
+        let b = child("BUTTON", "Cancel", WS_TABSTOP, 0, wnd, IDCANCEL as usize, font);
+        MoveWindow(b, w - s(140), by, s(110), s(34), 0);
+
+        EnableWindow(main, 0);
+        ShowWindow(wnd, SW_SHOW);
+        SetFocus(GetDlgItem(wnd, C_ING));
+    }
+    if lookup::Store::load().products.get(&barcode).is_none() {
+        start_lookup(barcode);
+    }
+}
+
+fn on_lookup_result(barcode: String, res: Result<Option<Found>, String>) {
+    let Some((wnd, current)) = with(|a| (a.check, a.check_product.as_ref().and_then(|p| p.barcode.clone()))) else { return };
+    if wnd.is_null() || current.as_deref() != Some(barcode.as_str()) {
+        return;
+    }
+    let item = |id| unsafe { GetDlgItem(wnd, id) };
+    match res {
+        Ok(Some(f)) => {
+            let found_name = [f.name.as_str(), f.brand.as_str()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" – ");
+            let mut msg = format!(
+                "Found on Open Food Facts: {}. Make sure this is the same product as the pack.",
+                if found_name.is_empty() { "(no name)" } else { &found_name }
+            );
+            if f.ingredients.trim().is_empty() {
+                msg.push_str(" It has no ingredients listed – type them from the pack below.");
+            }
+            with(|a| a.check_found_name = found_name);
+            set_text(item(C_FOUND), &msg);
+            set_text(item(C_ING), &f.ingredients);
+            set_text(item(C_MAY), &f.may_contain);
+        }
+        Ok(None) => set_text(item(C_FOUND), "Not found on Open Food Facts. Type the ingredients from the pack below."),
+        Err(e) => set_text(item(C_FOUND), &format!("Couldn't look it up: {e}. You can type the ingredients from the pack below.")),
+    }
+}
+
+fn close_check() {
+    let Some((wnd, main)) = with(|a| {
+        a.check_product = None;
+        (std::mem::replace(&mut a.check, null_mut()), a.main)
+    }) else {
+        return;
+    };
+    unsafe {
+        EnableWindow(main, 1);
+        if !wnd.is_null() {
+            DestroyWindow(wnd);
+        }
+        SetForegroundWindow(main);
+    }
+}
+
+fn accept_check(wnd: HWND) {
+    let item = |id| unsafe { GetDlgItem(wnd, id) };
+    // One ingredient per line is fine: lines are joined with commas.
+    let mut ing = String::new();
+    for line in get_text(item(C_ING)).lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")) {
+        let line = line.trim().trim_end_matches('.').to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if !ing.is_empty() {
+            ing.push_str(if ing.ends_with(',') { " " } else { ", " });
+        }
+        ing.push_str(&line);
+    }
+    let ing = ing.trim_end_matches(['.', ' ']).to_string();
+    if ing.is_empty() {
+        message_box(wnd, "Type the ingredients from the pack first.", MB_ICONWARNING);
+        return;
+    }
+    if !lookup::marks_balanced(&ing) {
+        message_box(wnd, "There's an odd number of * marks in the ingredients. Each allergen needs one before and one after, like *milk*.", MB_ICONWARNING);
+        return;
+    }
+    let may = get_text(item(C_MAY)).trim().trim_end_matches('.').to_string();
+    let Some((product, found_name)) = with(|a| (a.check_product.clone(), a.check_found_name.clone())) else { return };
+    let Some(product) = product else { return };
+    let Some(barcode) = product.barcode.clone() else { return };
+    let mut store = lookup::Store::load();
+    store.products.insert(
+        barcode,
+        lookup::Checked { store: product.store.clone().unwrap_or_default(), found_name, ingredients: ing, may_contain: may, checked_on: today() },
+    );
+    if let Err(e) = store.save() {
+        message_box(wnd, &e, MB_ICONERROR);
+        return;
+    }
+    close_check();
+    with(|a| a.last_mtime = None);
+    reload(false);
+    set_status(&format!("{} checked and saved – it's ready to print.", product.name));
+}
+
+unsafe extern "system" fn check_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_COMMAND => {
+            match loword(wp) as i32 {
+                C_RELOOK => {
+                    if let Some(Some(bc)) = with(|a| a.check_product.as_ref().and_then(|p| p.barcode.clone())) {
+                        set_text(GetDlgItem(hwnd, C_FOUND), "Looking up this barcode on Open Food Facts…");
+                        start_lookup(bc);
+                    }
+                }
+                IDOK => accept_check(hwnd),
+                IDCANCEL => close_check(),
+                _ => return DefWindowProcW(hwnd, msg, wp, lp),
+            }
+            0
+        }
+        WM_CLOSE => {
+            close_check();
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
