@@ -593,3 +593,246 @@ mod tests {
         assert!(chips.iter().any(|r| r.bold && r.text == "milk, soya"));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Writing: append a product column to the first sheet, leaving everything else
+// in the workbook untouched.
+
+fn col_letters(mut col: u32) -> String {
+    let mut s = Vec::new();
+    while col > 0 {
+        let r = (col - 1) % 26;
+        s.push((b'A' + r as u8) as char);
+        col = (col - 1) / 26;
+    }
+    s.iter().rev().collect()
+}
+
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+/// Finds `attr="value"` inside a tag's text.
+fn tag_attr(tag: &str, name: &str) -> Option<String> {
+    let pat = format!(" {name}=\"");
+    let i = tag.find(&pat)? + pat.len();
+    let j = tag[i..].find('"')? + i;
+    Some(tag[i..j].to_string())
+}
+
+/// Byte ranges of each `<row …>…</row>` (or `<row …/>`) in sheetData, with its row number.
+fn find_rows(xml: &str) -> Vec<(u32, usize, usize)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    while let Some(i) = xml[pos..].find("<row").map(|i| i + pos) {
+        let after = xml.as_bytes().get(i + 4).copied();
+        if !matches!(after, Some(b' ') | Some(b'>') | Some(b'/')) {
+            pos = i + 4;
+            continue;
+        }
+        let Some(tag_end) = xml[i..].find('>').map(|j| j + i) else { break };
+        let tag = &xml[i..=tag_end];
+        let end = if tag.ends_with("/>") {
+            tag_end + 1
+        } else {
+            match xml[tag_end..].find("</row>") {
+                Some(j) => tag_end + j + "</row>".len(),
+                None => break,
+            }
+        };
+        let r = tag_attr(tag, "r").and_then(|v| v.parse().ok()).unwrap_or(out.last().map_or(1, |l: &(u32, usize, usize)| l.0 + 1));
+        out.push((r, i, end));
+        pos = end;
+    }
+    out
+}
+
+/// Cells inside a row's text: (column, start, end, style).
+fn find_cells(row: &str) -> Vec<(u32, usize, usize, Option<String>)> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    let mut col = 0;
+    while let Some(i) = row[pos..].find("<c").map(|i| i + pos) {
+        if !matches!(row.as_bytes().get(i + 2), Some(b' ') | Some(b'>') | Some(b'/')) {
+            pos = i + 2;
+            continue;
+        }
+        let Some(tag_end) = row[i..].find('>').map(|j| j + i) else { break };
+        let tag = &row[i..=tag_end];
+        let end = if tag.ends_with("/>") {
+            tag_end + 1
+        } else {
+            match row[tag_end..].find("</c>") {
+                Some(j) => tag_end + j + 4,
+                None => break,
+            }
+        };
+        col = tag_attr(tag, "r").as_deref().and_then(cell_ref).map(|(c, _)| c).unwrap_or(col + 1);
+        out.push((col, i, end, tag_attr(tag, "s")));
+        pos = end;
+    }
+    out
+}
+
+/// Adds `values` (top to bottom, starting at the header row) as a new column
+/// after the last used one. Each new cell copies the style of the cell to its
+/// left. The original is kept as "<name> (backup).xlsx".
+pub fn append_product_column(path: &Path, values: &[String]) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).map_err(|_| "this doesn't look like an .xlsx file".to_string())?;
+    let sheet_path = first_sheet_path(&mut zip)?;
+    let xf_bold = bold_by_style(&mut zip);
+    let shared = match entry(&mut zip, "xl/sharedStrings.xml") {
+        Some(s) => parse_shared_strings(&s)?,
+        None => Vec::new(),
+    };
+    let mut xml = entry(&mut zip, &sheet_path).ok_or("worksheet is missing")?;
+    let cells = parse_sheet(&xml, &shared, &xf_bold)?;
+    let header_row = cells.iter().map(|c| c.row).min().unwrap_or(1);
+    let new_col = cells.iter().map(|c| c.col).max().unwrap_or(0) + 1;
+    let letters = col_letters(new_col);
+
+    if !xml.contains("<sheetData") {
+        return Err("the first sheet has an unusual layout, so the app can't add to it".into());
+    }
+    if let Some(i) = xml.find("<sheetData/>") {
+        xml.replace_range(i..i + "<sheetData/>".len(), "<sheetData></sheetData>");
+    }
+
+    for (k, value) in values.iter().enumerate() {
+        if value.is_empty() {
+            continue;
+        }
+        let row_no = header_row + k as u32;
+        let rows = find_rows(&xml);
+        let new_cell = |style: Option<String>| {
+            format!(
+                "<c r=\"{letters}{row_no}\"{} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+                style.map(|s| format!(" s=\"{s}\"")).unwrap_or_default(),
+                xml_escape(value)
+            )
+        };
+        match rows.iter().find(|r| r.0 == row_no) {
+            Some(&(_, start, end)) => {
+                let row = xml[start..end].to_string();
+                let tag_end = row.find('>').unwrap();
+                // Drop the "spans" hint; it would no longer be accurate.
+                let mut open = row[..=tag_end].to_string();
+                if let Some(sp) = tag_attr(&open, "spans") {
+                    open = open.replace(&format!(" spans=\"{sp}\""), "");
+                }
+                let self_closing = open.ends_with("/>");
+                if self_closing {
+                    open = format!("{}>", open.trim_end_matches("/>"));
+                }
+                let body = if self_closing { String::new() } else { row[tag_end + 1..row.len() - "</row>".len()].to_string() };
+                let found = find_cells(&body);
+                let style = found.iter().filter(|c| c.0 < new_col).last().and_then(|c| c.3.clone());
+                let cell = new_cell(style);
+                // Keep cells in column order; replace an empty formatted cell already in this column.
+                let new_body = match found.iter().find(|c| c.0 >= new_col) {
+                    Some(c) if c.0 == new_col => format!("{}{}{}", &body[..c.1], cell, &body[c.2..]),
+                    Some(c) => format!("{}{}{}", &body[..c.1], cell, &body[c.1..]),
+                    None => format!("{body}{cell}"),
+                };
+                xml.replace_range(start..end, &format!("{open}{new_body}</row>"));
+            }
+            None => {
+                let style = None;
+                let row = format!("<row r=\"{row_no}\">{}</row>", new_cell(style));
+                let at = rows.iter().find(|r| r.0 > row_no).map(|r| r.1).unwrap_or_else(|| xml.find("</sheetData>").unwrap());
+                xml.insert_str(at, &row);
+            }
+        }
+    }
+
+    // Widen the recorded used range if needed.
+    if let Some(i) = xml.find("<dimension ref=\"") {
+        let s = i + "<dimension ref=\"".len();
+        if let Some(e) = xml[s..].find('"').map(|e| e + s) {
+            let r = xml[s..e].to_string();
+            let last = r.split(':').last().unwrap_or("A1");
+            if let Some((c, rw)) = cell_ref(last) {
+                let first = r.split(':').next().unwrap_or("A1");
+                let rw = rw.max(header_row + values.len() as u32 - 1);
+                let new_ref = format!("{first}:{}{rw}", col_letters(c.max(new_col)));
+                xml.replace_range(s..e, &new_ref);
+            }
+        }
+    }
+
+    // Rebuild the zip, copying every other part unchanged.
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..zip.len() {
+        let f = zip.by_index_raw(i).map_err(|e| e.to_string())?;
+        if f.name() == sheet_path {
+            drop(f);
+            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            out.start_file(sheet_path.as_str(), opts).map_err(|e| e.to_string())?;
+            std::io::Write::write_all(&mut out, xml.as_bytes()).map_err(|e| e.to_string())?;
+        } else {
+            out.raw_copy_file(f).map_err(|e| e.to_string())?;
+        }
+    }
+    let new_bytes = out.finish().map_err(|e| e.to_string())?.into_inner();
+
+    // Sanity check before touching the real file.
+    let check = read_products_from_bytes(new_bytes.clone(), Marking::Bold)?;
+    if !check.iter().any(|p| p.name == values[0]) {
+        return Err("the new column didn't read back correctly, so the spreadsheet was left unchanged".into());
+    }
+
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Products".into());
+    let backup = path.with_file_name(format!("{stem} (backup).xlsx"));
+    let _ = std::fs::write(&backup, &bytes);
+    let tmp = path.with_file_name(format!("~{stem}.tmp"));
+    std::fs::write(&tmp, &new_bytes).map_err(|e| format!("couldn't write next to the spreadsheet: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "couldn't save the spreadsheet ({e}). If it's open in Excel, close it and try again"
+        ));
+    }
+    Ok(())
+}
+
+fn read_products_from_bytes(bytes: Vec<u8>, marking: Marking) -> Result<Vec<Product>, String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
+    let sheet_path = first_sheet_path(&mut zip)?;
+    let xf_bold = bold_by_style(&mut zip);
+    let shared = match entry(&mut zip, "xl/sharedStrings.xml") {
+        Some(s) => parse_shared_strings(&s)?,
+        None => Vec::new(),
+    };
+    let sheet = entry(&mut zip, &sheet_path).ok_or("worksheet is missing")?;
+    Ok(build_products(parse_sheet(&sheet, &shared, &xf_bold)?, marking))
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn appends_a_column() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/Products.xlsx");
+        let dir = std::env::temp_dir().join("allergen_append_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Products.xlsx");
+        std::fs::copy(&src, &p).unwrap();
+        let vals: Vec<String> =
+            ["Oat & Raisin <Cookies>", "Shelf life: 7 days", "Barcode: 5000168001234", "Tesco"].iter().map(|s| s.to_string()).collect();
+        append_product_column(&p, &vals).unwrap();
+        let ps = read_products(&p, Marking::Brackets).unwrap();
+        assert_eq!(ps.len(), 8);
+        let last = ps.last().unwrap();
+        assert_eq!(last.name, "Oat & Raisin <Cookies>");
+        assert_eq!(last.barcode.as_deref(), Some("5000168001234"));
+        assert_eq!(last.store.as_deref(), Some("Tesco"));
+        assert_eq!(last.shelf_life_days, Some(7));
+        assert!(dir.join("Products (backup).xlsx").exists());
+        // Earlier products untouched.
+        assert_eq!(ps[0], read_products(&src, Marking::Brackets).unwrap()[0]);
+        println!("{}", p.display());
+    }
+}

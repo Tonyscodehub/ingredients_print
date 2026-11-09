@@ -15,7 +15,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetKeyState, SetFocus};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -24,6 +24,7 @@ const APP_TITLE: &str = "Allergen Label Printer";
 const ID_REFRESH: usize = 101;
 const ID_SETTINGS: usize = 102;
 const ID_COPIES: usize = 103;
+const ID_ADD: usize = 104;
 const ID_PRODUCT: usize = 1000;
 
 const S_PATH: i32 = 2001;
@@ -55,6 +56,13 @@ const C_FOUND: i32 = 3002;
 const C_ING: i32 = 3003;
 const C_MAY: i32 = 3004;
 const C_RELOOK: i32 = 3005;
+
+const A_BARCODE: i32 = 4001;
+const A_LOOKUP: i32 = 4002;
+const A_FOUND: i32 = 4003;
+const A_NAME: i32 = 4004;
+const A_SHOP: i32 = 4005;
+const A_SHELF: i32 = 4006;
 
 // Static control styles (kept local; windows-sys files them under SystemServices).
 const SS_LEFT: u32 = 0x0;
@@ -94,6 +102,10 @@ struct App {
     check: HWND,
     check_product: Option<Product>,
     check_found_name: String,
+    add: HWND,
+    add_barcode: String,
+    /// Latest lookup result from the Add window, reused by the checking screen.
+    found_cache: Option<(String, Found)>,
 }
 
 thread_local! {
@@ -128,6 +140,8 @@ fn get_text(h: HWND) -> String {
 }
 
 fn child(class: &str, text: &str, style: u32, ex: u32, parent: HWND, id: usize, font: HFONT) -> HWND {
+    // Show "&" literally in labels (otherwise "Oat & Raisin" loses its ampersand).
+    let style = if class == "STATIC" { style | 0x80 /* SS_NOPREFIX */ } else { style };
     let c = wide(class);
     let t = wide(text);
     unsafe {
@@ -178,6 +192,7 @@ pub fn run() {
             ("AllergenPreview", preview_proc),
             ("AllergenSettings", settings_proc),
             ("AllergenCheck", check_proc),
+            ("AllergenAdd", add_proc),
         ] {
             let n = wide(name);
             let wc = WNDCLASSEXW {
@@ -230,6 +245,9 @@ pub fn run() {
                 check: null_mut(),
                 check_product: None,
                 check_found_name: String::new(),
+                add: null_mut(),
+                add_barcode: String::new(),
+                found_cache: None,
             })
         });
 
@@ -255,6 +273,7 @@ pub fn run() {
         let btn_style = WS_TABSTOP | BS_PUSHBUTTON as u32;
         let refresh = child("BUTTON", "Refresh products", btn_style, 0, main, ID_REFRESH, ui_font);
         let settings = child("BUTTON", "Settings…", btn_style, 0, main, ID_SETTINGS, ui_font);
+        let add = child("BUTTON", "Add bought-in product…", btn_style, 0, main, ID_ADD, ui_font);
         let lbl = child("STATIC", "Copies:", (SS_RIGHT | SS_CENTERIMAGE) as u32, 0, main, 0, ui_font);
         let copies = child("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, main, ID_COPIES, ui_font);
         for i in 1..=10 {
@@ -270,7 +289,7 @@ pub fn run() {
             a.preview = preview;
             a.status = status;
             a.copies = copies;
-            a.tools = vec![refresh, settings, lbl, copies, status];
+            a.tools = vec![refresh, settings, add, lbl, copies, status];
         });
 
         reload(false);
@@ -281,7 +300,10 @@ pub fn run() {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            let (settings, check) = with(|a| (a.settings, a.check)).unwrap_or((null_mut(), null_mut()));
+            let (settings, check, add) = with(|a| (a.settings, a.check, a.add)).unwrap_or((null_mut(), null_mut(), null_mut()));
+            if !add.is_null() && IsDialogMessageW(add, &msg) != 0 {
+                continue;
+            }
             if !settings.is_null() && IsDialogMessageW(settings, &msg) != 0 {
                 continue;
             }
@@ -386,13 +408,13 @@ fn layout_main() {
         let bh = s(34);
         let th = bh + 2 * pad;
         let mut x = pad;
-        let widths = [s(160), s(110), s(70), s(64)];
+        let widths = [s(150), s(100), s(200), s(64), s(60)];
         for (i, &tw) in widths.iter().enumerate() {
-            let (y, hh) = if i == 3 { (pad + s(5), s(300)) } else { (pad, bh) };
+            let (y, hh) = if i == 4 { (pad + s(5), s(300)) } else { (pad, bh) };
             MoveWindow(tools[i], x, y, tw, hh, 1);
             x += tw + pad;
         }
-        MoveWindow(tools[4], x + pad, pad, (w - x - 2 * pad).max(0), bh, 1);
+        MoveWindow(tools[5], x, pad, (w - x - pad).max(0), bh, 1);
         let pw = s(340).min(w / 2);
         MoveWindow(host, 0, th, (w - pw).max(0), (h - th).max(0), 1);
         MoveWindow(preview, w - pw, th, pw, (h - th).max(0), 1);
@@ -650,6 +672,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             match loword(wp) as usize {
                 ID_REFRESH => reload(true),
                 ID_SETTINGS => open_settings(),
+                ID_ADD => open_add(),
                 _ => return DefWindowProcW(hwnd, msg, wp, lp),
             }
             0
@@ -1285,11 +1308,26 @@ fn open_check(idx: usize) {
         SetFocus(GetDlgItem(wnd, C_ING));
     }
     if lookup::Store::load().products.get(&barcode).is_none() {
-        start_lookup(barcode);
+        let cached = with(|a| a.found_cache.clone()).flatten().filter(|(bc, _)| *bc == barcode);
+        match cached {
+            Some((bc, f)) => on_lookup_result(bc, Ok(Some(f))),
+            None => start_lookup(barcode),
+        }
     }
 }
 
 fn on_lookup_result(barcode: String, res: Result<Option<Found>, String>) {
+    if let Ok(Some(f)) = &res {
+        let f = f.clone();
+        let bc = barcode.clone();
+        with(|a| a.found_cache = Some((bc, f)));
+    }
+    if let Some((add, add_bc)) = with(|a| (a.add, a.add_barcode.clone())) {
+        if !add.is_null() && add_bc == barcode {
+            on_add_lookup(add, &res);
+            return;
+        }
+    }
     let Some((wnd, current)) = with(|a| (a.check, a.check_product.as_ref().and_then(|p| p.barcode.clone()))) else { return };
     if wnd.is_null() || current.as_deref() != Some(barcode.as_str()) {
         return;
@@ -1391,6 +1429,206 @@ unsafe extern "system" fn check_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
         }
         WM_CLOSE => {
             close_check();
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Add a bought-in product (writes a new column to the spreadsheet)
+
+fn open_add() {
+    let Some((existing, main, font, hinst, default_days)) =
+        with(|a| (a.add, a.main, a.ui_font, a.hinst, a.cfg.best_before_days.clamp(1, 10)))
+    else {
+        return;
+    };
+    unsafe {
+        if !existing.is_null() {
+            SetForegroundWindow(existing);
+            return;
+        }
+        let cls = wide("AllergenAdd");
+        let title = wide("Add bought-in product");
+        let (w, h) = (s(620), s(430));
+        let mut mr: RECT = std::mem::zeroed();
+        GetWindowRect(main, &mut mr);
+        let x = mr.left + ((mr.right - mr.left) - w) / 2;
+        let y = mr.top + ((mr.bottom - mr.top) - h) / 2;
+        let wnd = CreateWindowExW(
+            WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
+            cls.as_ptr(),
+            title.as_ptr(),
+            WS_POPUP | WS_CAPTION | WS_SYSMENU,
+            x.max(0),
+            y.max(0),
+            w,
+            h,
+            main,
+            null_mut(),
+            hinst,
+            null(),
+        );
+        with(|a| {
+            a.add = wnd;
+            a.add_barcode.clear();
+        });
+        let lx = s(16);
+        let lw = s(250);
+        let cx = lx + lw;
+        let rh = s(26);
+        let at = |id: i32, class: &str, text: &str, style: u32, ex: u32, x: i32, y: i32, ww: i32, hh: i32| {
+            let c = child(class, text, style, ex, wnd, id as usize, font);
+            MoveWindow(c, x, y, ww, hh, 0);
+            c
+        };
+        let edit = WS_TABSTOP | ES_AUTOHSCROLL as u32;
+        let mut y = s(18);
+        at(0, "STATIC", "Barcode (type it, or scan it):", SS_LEFT | SS_CENTERIMAGE, 0, lx, y, lw, rh);
+        at(A_BARCODE, "EDIT", "", edit, WS_EX_CLIENTEDGE, cx, y, s(200), rh);
+        at(A_LOOKUP, "BUTTON", "Look up", WS_TABSTOP, 0, cx + s(210), y - s(2), s(110), s(30));
+        y += s(38);
+        at(A_FOUND, "STATIC", "Enter a barcode and press Look up (or Enter) to fill in the product name.", SS_LEFT, 0, lx, y, w - s(48), s(40));
+        y += s(50);
+        at(0, "STATIC", "Product name (printed on the label):", SS_LEFT | SS_CENTERIMAGE, 0, lx, y, lw, rh);
+        at(A_NAME, "EDIT", "", edit, WS_EX_CLIENTEDGE, cx, y, s(320), rh);
+        y += s(40);
+        at(0, "STATIC", "Shop (optional, never printed):", SS_LEFT | SS_CENTERIMAGE, 0, lx, y, lw, rh);
+        at(A_SHOP, "EDIT", "", edit, WS_EX_CLIENTEDGE, cx, y, s(200), rh);
+        y += s(40);
+        at(0, "STATIC", "Shelf life:", SS_LEFT | SS_CENTERIMAGE, 0, lx, y, lw, rh);
+        let cb = at(A_SHELF, "COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, cx, y + s(2), s(110), s(300));
+        for d in 1..=10 {
+            let t = wide(&format!("{d} day{}", if d == 1 { "" } else { "s" }));
+            SendMessageW(cb, CB_ADDSTRING, 0, t.as_ptr() as isize);
+        }
+        SendMessageW(cb, CB_SETCURSEL, (default_days - 1) as usize, 0);
+        y += s(48);
+        at(
+            0,
+            "STATIC",
+            "This adds a new column to the spreadsheet (a backup copy of the old file is kept), then opens the checking screen so you can check the ingredients against the pack.",
+            SS_LEFT,
+            0,
+            lx,
+            y,
+            w - s(48),
+            s(44),
+        );
+        let by = h - s(96);
+        at(IDOK, "BUTTON", "Add product", WS_TABSTOP, 0, w - s(290), by, s(140), s(34));
+        at(IDCANCEL, "BUTTON", "Cancel", WS_TABSTOP, 0, w - s(140), by, s(110), s(34));
+        EnableWindow(main, 0);
+        ShowWindow(wnd, SW_SHOW);
+        SetFocus(GetDlgItem(wnd, A_BARCODE));
+    }
+}
+
+fn close_add() {
+    let Some((wnd, main)) = with(|a| (std::mem::replace(&mut a.add, null_mut()), a.main)) else { return };
+    unsafe {
+        EnableWindow(main, 1);
+        if !wnd.is_null() {
+            DestroyWindow(wnd);
+        }
+        SetForegroundWindow(main);
+    }
+}
+
+fn add_lookup(wnd: HWND) {
+    let item = |id| unsafe { GetDlgItem(wnd, id) };
+    match xlsx::parse_barcode(&get_text(item(A_BARCODE))) {
+        Some(bc) if !bc.is_empty() => {
+            with(|a| a.add_barcode = bc.clone());
+            set_text(item(A_FOUND), "Looking up this barcode on Open Food Facts…");
+            start_lookup(bc);
+            unsafe { SetFocus(item(A_NAME)) };
+        }
+        _ => set_text(item(A_FOUND), "That doesn't look like a barcode – it should be the 8 to 14 digit number under the bars."),
+    }
+}
+
+fn on_add_lookup(wnd: HWND, res: &Result<Option<Found>, String>) {
+    let item = |id| unsafe { GetDlgItem(wnd, id) };
+    match res {
+        Ok(Some(f)) => {
+            let name_box = item(A_NAME);
+            if get_text(name_box).trim().is_empty() && !f.name.is_empty() {
+                set_text(name_box, &f.name);
+            }
+            let brand = if f.brand.is_empty() { String::new() } else { format!(" ({})", f.brand) };
+            set_text(
+                item(A_FOUND),
+                &format!("Found: {}{brand}. Change the name if you want it worded differently on the label.", if f.name.is_empty() { "(no name)" } else { &f.name }),
+            );
+        }
+        Ok(None) => set_text(item(A_FOUND), "Not found on Open Food Facts. You can still add it – type the product name, and the ingredients from the pack on the next screen."),
+        Err(e) => set_text(item(A_FOUND), &format!("Couldn't look it up ({e}). You can still add it and type the details from the pack.")),
+    }
+}
+
+fn do_add(wnd: HWND) {
+    let item = |id| unsafe { GetDlgItem(wnd, id) };
+    let Some(bc) = xlsx::parse_barcode(&get_text(item(A_BARCODE))).filter(|b| !b.is_empty()) else {
+        message_box(wnd, "Enter the barcode – the 8 to 14 digit number under the bars.", MB_ICONWARNING);
+        return;
+    };
+    let name = get_text(item(A_NAME)).split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        message_box(wnd, "Enter the product name to print on the label.", MB_ICONWARNING);
+        return;
+    }
+    let shop = get_text(item(A_SHOP)).trim().to_string();
+    let days = unsafe { SendMessageW(item(A_SHELF), CB_GETCURSEL, 0, 0) }.clamp(0, 9) + 1;
+    let Some((path, clash)) = with(|a| {
+        let clash = a
+            .products
+            .iter()
+            .find(|p| p.barcode.as_deref() == Some(bc.as_str()) || p.name.eq_ignore_ascii_case(&name))
+            .map(|p| p.name.clone());
+        (a.cfg.spreadsheet.clone(), clash)
+    }) else {
+        return;
+    };
+    if let Some(existing) = clash {
+        message_box(wnd, &format!("\"{existing}\" is already in the spreadsheet with that name or barcode."), MB_ICONWARNING);
+        return;
+    }
+    let mut values = vec![name.clone(), format!("Shelf life: {days} day{}", if days == 1 { "" } else { "s" }), format!("Barcode: {bc}")];
+    if !shop.is_empty() {
+        values.push(shop);
+    }
+    if let Err(e) = xlsx::append_product_column(Path::new(&path), &values) {
+        message_box(wnd, &format!("Couldn't add it to the spreadsheet:\n\n{e}"), MB_ICONWARNING);
+        return;
+    }
+    close_add();
+    with(|a| a.last_mtime = None);
+    reload(false);
+    if let Some(Some(idx)) = with(|a| a.products.iter().position(|p| p.barcode.as_deref() == Some(bc.as_str()))) {
+        if with(|a| a.products[idx].needs_check).unwrap_or(false) {
+            open_check(idx);
+        }
+    }
+    set_status(&format!("{name} added to the spreadsheet – check its ingredients against the pack to finish."));
+}
+
+unsafe extern "system" fn add_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    match msg {
+        WM_COMMAND => {
+            match loword(wp) as i32 {
+                A_LOOKUP => add_lookup(hwnd),
+                // Enter in the barcode box (e.g. from a scanner) looks it up rather than adding.
+                IDOK if GetFocus() == GetDlgItem(hwnd, A_BARCODE) => add_lookup(hwnd),
+                IDOK => do_add(hwnd),
+                IDCANCEL => close_add(),
+                _ => return DefWindowProcW(hwnd, msg, wp, lp),
+            }
+            0
+        }
+        WM_CLOSE => {
+            close_add();
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),

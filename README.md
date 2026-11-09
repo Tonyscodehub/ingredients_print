@@ -47,6 +47,8 @@ For things you buy in and resell, the column only needs the product name, an opt
 | Barcode: 5010251703129 |
 | Morrisons |
 
+You can add one without opening the spreadsheet: press **Add bought-in product…**, type or scan the barcode (Enter looks it up and fills in the name), check the product name, optionally add the shop, pick a shelf life, and press **Add product**. The app adds a new column to the spreadsheet (keeping the old file as `Products (backup).xlsx`), adds the button, and opens the checking screen. If the spreadsheet is open in Excel, close it first so the app can save it.
+
 1. The button shows "(check ingredients)" until someone has checked it. Pressing it opens the checking screen instead of printing.
 2. The app looks the barcode up on [Open Food Facts](https://world.openfoodfacts.org) (a free, community-run product database). It fills in the ingredients with allergens marked by \*asterisks\*, plus the pack's "may contain" warning, and shows the product name it found so you can confirm it's the right item.
 3. Check every word against the pack, fix anything that's wrong or missing (if nothing is found, type it from the pack), and press **Accept and save**. From then on the button prints straight away, without going online.
