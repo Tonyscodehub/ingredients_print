@@ -20,7 +20,7 @@ pub fn off_path(barcode: &str) -> String {
 }
 
 /// What Open Food Facts returned for a barcode.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Found {
     pub name: String,
     pub brand: String,
@@ -53,16 +53,23 @@ fn store_path() -> PathBuf {
 
 impl Store {
     pub fn load() -> Store {
-        std::fs::read_to_string(store_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        Self::load_from(&store_path())
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let p = store_path();
+        self.save_to(&store_path())
+    }
+
+    pub fn load_from(p: &std::path::Path) -> Store {
+        std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save_to(&self, p: &std::path::Path) -> Result<(), String> {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let s = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&p, s).map_err(|e| format!("couldn't save to {}: {e}", p.display()))
+        std::fs::write(p, s).map_err(|e| format!("couldn't save to {}: {e}", p.display()))
     }
 }
 
@@ -207,6 +214,46 @@ pub fn marked_to_runs(s: &str) -> Vec<Run> {
 
 pub fn marks_balanced(s: &str) -> bool {
     s.matches('*').count() % 2 == 0
+}
+
+/// Tidies checked ingredients: one per line is fine (lines are joined with
+/// commas), spaces are squeezed, and a trailing full stop is dropped.
+pub fn normalise_ingredients(text: &str) -> Result<String, String> {
+    let mut ing = String::new();
+    for line in text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")) {
+        let line = line.trim().trim_end_matches('.').to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if !ing.is_empty() {
+            ing.push_str(if ing.ends_with(',') { " " } else { ", " });
+        }
+        ing.push_str(&line);
+    }
+    if ing.is_empty() {
+        return Err("Type the ingredients from the pack first.".into());
+    }
+    if !marks_balanced(&ing) {
+        return Err("There's an odd number of * marks in the ingredients. Each allergen needs one before and one after, like *milk*.".into());
+    }
+    Ok(ing)
+}
+
+/// Fills in checked details for bought-in products. Returns how many still need checking.
+pub fn apply_checked(ps: &mut [crate::xlsx::Product], store: &Store) -> usize {
+    let mut unchecked = 0;
+    for p in ps.iter_mut() {
+        let Some(bc) = p.barcode.clone() else { continue };
+        match store.products.get(&bc) {
+            Some(c) if !c.ingredients.trim().is_empty() => {
+                p.ingredients = vec![marked_to_runs(&c.ingredients)];
+                p.may_contain = Some(c.may_contain.clone()).filter(|m| !m.trim().is_empty());
+                p.needs_check = false;
+            }
+            _ => unchecked += 1,
+        }
+    }
+    unchecked
 }
 
 #[cfg(test)]

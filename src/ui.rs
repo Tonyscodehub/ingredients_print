@@ -7,7 +7,7 @@ use crate::xlsx::{self, Product, Run};
 use std::cell::RefCell;
 use std::path::Path;
 use std::ptr::{null, null_mut};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime};
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -45,11 +45,15 @@ const S_BESTBEFORE: i32 = 2015;
 const S_ADDRESS: i32 = 2016;
 const S_WARNING: i32 = 2017;
 const S_MARKING: i32 = 2018;
+const S_SERVER: i32 = 2019;
+const S_KEY: i32 = 2020;
+const S_SELFSIGNED: i32 = 2021;
 
 const TIMER_POLL: usize = 1;
 const WM_APP_STATUS: u32 = WM_APP + 1;
 const WM_APP_LOOKUP: u32 = WM_APP + 2;
 const WM_APP_RECHECK: u32 = WM_APP + 3;
+const WM_APP_TITLE: u32 = WM_APP + 4;
 
 const C_INFO: i32 = 3001;
 const C_FOUND: i32 = 3002;
@@ -293,6 +297,7 @@ pub fn run() {
         });
 
         reload(false);
+        start_helper();
         SetTimer(main, TIMER_POLL, 60_000, None);
         ShowWindow(main, SW_SHOWDEFAULT);
         layout_main();
@@ -698,6 +703,11 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             open_check(wp);
             0
         }
+        WM_APP_TITLE => {
+            let b = Box::from_raw(lp as *mut String);
+            set_text(hwnd, &b);
+            0
+        }
         WM_MOUSEWHEEL => {
             if let Some(h) = with(|a| a.host) {
                 SendMessageW(h, msg, wp, lp);
@@ -847,7 +857,7 @@ fn open_settings() {
         }
         let cls = wide("AllergenSettings");
         let title = wide("Settings");
-        let (w, h) = (s(660), s(710));
+        let (w, h) = (s(660), s(760));
         let mut mr: RECT = std::mem::zeroed();
         GetWindowRect(main, &mut mr);
         let x = mr.left + ((mr.right - mr.left) - w) / 2;
@@ -872,8 +882,8 @@ fn open_settings() {
         let lw = s(200);
         let cx = lx + lw + s(8);
         let rh = s(28);
-        let step = s(40);
-        let mut y = s(16);
+        let step = s(37);
+        let mut y = s(14);
         let edit = WS_TABSTOP | ES_AUTOHSCROLL as u32;
         let label = |text: &str, x: i32, y: i32, w: i32| {
             let h = child("STATIC", text, (SS_LEFT | SS_CENTERIMAGE) as u32, 0, wnd, 0, font);
@@ -975,6 +985,17 @@ fn open_settings() {
 
         label("Warning (bottom of label):", lx, y, lw);
         place(S_WARNING, "EDIT", &cfg.warning, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
+        y += step;
+
+        label("Web app server (print helper):", lx, y, lw);
+        place(S_SERVER, "EDIT", &cfg.server_url, edit, WS_EX_CLIENTEDGE, cx, y, s(220), rh);
+        label("e.g. https://192.168.1.128:8443", cx + s(228), y, s(200));
+        y += step;
+
+        label("Print helper key (if set):", lx, y, lw);
+        place(S_KEY, "EDIT", &cfg.server_key, edit, WS_EX_CLIENTEDGE, cx, y, s(160), rh);
+        let cb = place(S_SELFSIGNED, "BUTTON", "Accept a self-signed certificate", WS_TABSTOP | 3 /* BS_AUTOCHECKBOX */, 0, cx + s(176), y, s(250), rh);
+        SendMessageW(cb, BM_SETCHECK, cfg.server_allow_self_signed as usize, 0);
 
         let by = h - s(100);
         place(S_TEST, "BUTTON", "Print test label", WS_TABSTOP, 0, lx, by, s(150), s(34));
@@ -1041,6 +1062,12 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
     cfg.footer = get_text(item(S_FOOTER)).trim().to_string();
     cfg.business_name = get_text(item(S_BUSINESS)).trim().to_string();
     cfg.allergens_in_brackets = unsafe { SendMessageW(item(S_MARKING), CB_GETCURSEL, 0, 0) } != 1;
+    cfg.server_url = get_text(item(S_SERVER)).trim().trim_end_matches('/').to_string();
+    if !cfg.server_url.is_empty() && crate::helper::parse_server_url(&cfg.server_url).is_none() {
+        return Err("The web app server address doesn't look right. It should be like https://192.168.1.128:8443".into());
+    }
+    cfg.server_key = get_text(item(S_KEY)).trim().to_string();
+    cfg.server_allow_self_signed = unsafe { SendMessageW(item(S_SELFSIGNED), BM_GETCHECK, 0, 0) } == 1;
     cfg.address = get_text(item(S_ADDRESS)).trim().to_string();
     cfg.contact = get_text(item(S_CONTACT)).trim().to_string();
     cfg.warning = get_text(item(S_WARNING)).trim().to_string();
@@ -1099,14 +1126,21 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                         if let Err(e) = cfg.save() {
                             message_box(hwnd, &e, MB_ICONWARNING);
                         }
-                        let path_changed = with(|a| {
+                        let (path_changed, helper_changed) = with(|a| {
                             let changed = a.cfg.spreadsheet != cfg.spreadsheet
                                 || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets;
+                            let helper = a.cfg.server_url != cfg.server_url
+                                || a.cfg.server_key != cfg.server_key
+                                || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed
+                                || a.cfg.printer != cfg.printer;
                             a.cfg = cfg;
-                            changed
+                            (changed, helper)
                         })
-                        .unwrap_or(false);
+                        .unwrap_or((false, false));
                         close_settings();
+                        if helper_changed {
+                            start_helper();
+                        }
                         if path_changed {
                             with(|a| {
                                 a.products.clear();
@@ -1135,22 +1169,8 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 // ---------------------------------------------------------------------------
 // Bought-in products: barcode lookup and checking
 
-/// Fills in checked details for bought-in products. Returns how many still need checking.
 fn apply_checked(ps: &mut [Product]) -> usize {
-    let store = lookup::Store::load();
-    let mut unchecked = 0;
-    for p in ps.iter_mut() {
-        let Some(bc) = p.barcode.clone() else { continue };
-        match store.products.get(&bc) {
-            Some(c) if !c.ingredients.trim().is_empty() => {
-                p.ingredients = vec![lookup::marked_to_runs(&c.ingredients)];
-                p.may_contain = Some(c.may_contain.clone()).filter(|m| !m.trim().is_empty());
-                p.needs_check = false;
-            }
-            _ => unchecked += 1,
-        }
-    }
-    unchecked
+    lookup::apply_checked(ps, &lookup::Store::load())
 }
 
 unsafe extern "system" fn button_subclass(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, idx: usize) -> LRESULT {
@@ -1371,27 +1391,13 @@ fn close_check() {
 
 fn accept_check(wnd: HWND) {
     let item = |id| unsafe { GetDlgItem(wnd, id) };
-    // One ingredient per line is fine: lines are joined with commas.
-    let mut ing = String::new();
-    for line in get_text(item(C_ING)).lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")) {
-        let line = line.trim().trim_end_matches('.').to_string();
-        if line.is_empty() {
-            continue;
+    let ing = match lookup::normalise_ingredients(&get_text(item(C_ING))) {
+        Ok(i) => i,
+        Err(e) => {
+            message_box(wnd, &e, MB_ICONWARNING);
+            return;
         }
-        if !ing.is_empty() {
-            ing.push_str(if ing.ends_with(',') { " " } else { ", " });
-        }
-        ing.push_str(&line);
-    }
-    let ing = ing.trim_end_matches(['.', ' ']).to_string();
-    if ing.is_empty() {
-        message_box(wnd, "Type the ingredients from the pack first.", MB_ICONWARNING);
-        return;
-    }
-    if !lookup::marks_balanced(&ing) {
-        message_box(wnd, "There's an odd number of * marks in the ingredients. Each allergen needs one before and one after, like *milk*.", MB_ICONWARNING);
-        return;
-    }
+    };
     let may = get_text(item(C_MAY)).trim().trim_end_matches('.').to_string();
     let Some((product, found_name)) = with(|a| (a.check_product.clone(), a.check_found_name.clone())) else { return };
     let Some(product) = product else { return };
@@ -1633,4 +1639,130 @@ unsafe extern "system" fn add_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Print helper: collect print jobs from the web app and print them here.
+
+static HELPER_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn post_boxed(main: usize, msg: u32, wp: usize, text: String) {
+    let b = Box::into_raw(Box::new(text));
+    unsafe {
+        if PostMessageW(main as HWND, msg, wp, b as isize) == 0 {
+            drop(Box::from_raw(b));
+        }
+    }
+}
+
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
+}
+
+/// (Re)starts the print helper with the current settings; stops it if no server is set.
+fn start_helper() {
+    let gen = HELPER_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let Some((cfg, main)) = with(|a| (a.cfg.clone(), a.main as usize)) else { return };
+    let url = cfg.server_url.trim().to_string();
+    if url.is_empty() {
+        post_boxed(main, WM_APP_TITLE, 0, APP_TITLE.to_string());
+        return;
+    }
+    let Some((secure, host, port, base)) = crate::helper::parse_server_url(&url) else {
+        post_boxed(main, WM_APP_TITLE, 0, format!("{APP_TITLE} – print helper: the server address in Settings isn't valid"));
+        return;
+    };
+    std::thread::spawn(move || {
+        let alive = || HELPER_GEN.load(Ordering::SeqCst) == gen;
+        let pause = |secs: u64| {
+            for _ in 0..secs {
+                if HELPER_GEN.load(Ordering::SeqCst) != gen {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        };
+        let pc = std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Windows PC".into());
+        let mut headers = String::from("Accept: application/json\r\n");
+        if !cfg.server_key.trim().is_empty() {
+            headers.push_str(&format!("X-Print-Helper-Key: {}\r\n", cfg.server_key.trim()));
+        }
+        let agent = "AllergenLabels-PrintHelper/1.3";
+        let mut last_title = String::new();
+        let mut title = |t: String| {
+            if t != last_title {
+                last_title = t.clone();
+                post_boxed(main, WM_APP_TITLE, 0, t);
+            }
+        };
+        while alive() {
+            let path = format!("{base}/api/helper/next?name={}", url_encode(&pc));
+            let req = crate::http::Req {
+                secure,
+                host: &host,
+                port,
+                method: "GET",
+                path: &path,
+                body: None,
+                headers: &headers,
+                insecure: cfg.server_allow_self_signed,
+                receive_timeout_ms: 40_000,
+            };
+            let res = crate::http::request(&req, agent);
+            if !alive() {
+                return;
+            }
+            match res {
+                Ok((200, body)) => {
+                    title(format!("{APP_TITLE} – print helper connected to {host}"));
+                    let Ok(job) = serde_json::from_str::<crate::helper::JobMsg>(&body) else {
+                        pause(5);
+                        continue;
+                    };
+                    let mut jcfg = job.cfg.clone();
+                    jcfg.printer = cfg.printer.clone();
+                    let name = job.product.name.clone();
+                    post_boxed(main, WM_APP_STATUS, 0, format!("Printing {name} for the web app…"));
+                    let (ok, msg) = match label::print_label(&job.product, &jcfg, job.copies) {
+                        Ok(printer) => (
+                            true,
+                            format!("Printed {name} ({} label{}) on {printer}", job.copies, if job.copies == 1 { "" } else { "s" }),
+                        ),
+                        Err(e) => (false, format!("Couldn't print {name}: {e}")),
+                    };
+                    post_boxed(main, WM_APP_STATUS, 0, format!("{msg} – from the web app at {}", now_hhmm()));
+                    let body = serde_json::json!({ "id": job.id, "ok": ok, "message": msg }).to_string();
+                    let h2 = format!("{headers}Content-Type: application/json\r\n");
+                    let rpath = format!("{base}/api/helper/result");
+                    let post = crate::http::Req {
+                        secure,
+                        host: &host,
+                        port,
+                        method: "POST",
+                        path: &rpath,
+                        body: Some(body.as_bytes()),
+                        headers: &h2,
+                        insecure: cfg.server_allow_self_signed,
+                        receive_timeout_ms: 15_000,
+                    };
+                    let _ = crate::http::request(&post, agent);
+                }
+                Ok((204, _)) => title(format!("{APP_TITLE} – print helper connected to {host}")),
+                Ok((401, _)) => {
+                    title(format!("{APP_TITLE} – print helper: the server rejected the key in Settings"));
+                    pause(30);
+                }
+                Ok((code, _)) => {
+                    title(format!("{APP_TITLE} – print helper: server error {code}"));
+                    pause(15);
+                }
+                Err(e) => {
+                    title(format!("{APP_TITLE} – print helper can't reach {host} ({e})"));
+                    pause(10);
+                }
+            }
+        }
+    });
 }

@@ -31,6 +31,12 @@ pub struct Config {
     pub warning: String,
     /// true = text in (brackets) is the allergen; false = bold text in the spreadsheet.
     pub allergens_in_brackets: bool,
+    /// Print helper: web server address (empty = off), e.g. https://192.168.1.128:8443
+    pub server_url: String,
+    /// Print helper: key, if the server has PRINT_HELPER_KEY set.
+    pub server_key: String,
+    /// Print helper: accept the server's self-signed certificate.
+    pub server_allow_self_signed: bool,
     /// Best before = day printed + this many days. 0 = don't print a date.
     pub best_before_days: u32,
 }
@@ -54,6 +60,9 @@ impl Default for Config {
             warning: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination.".into(),
             best_before_days: 3,
             allergens_in_brackets: true,
+            server_url: String::new(),
+            server_key: String::new(),
+            server_allow_self_signed: true,
         }
     }
 }
@@ -80,18 +89,22 @@ impl Config {
     }
 
     pub fn load() -> Config {
-        std::fs::read_to_string(config_path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        Self::load_from(&config_path())
     }
 
     pub fn save(&self) -> Result<(), String> {
-        let p = config_path();
+        self.save_to(&config_path())
+    }
+
+    pub fn load_from(p: &std::path::Path) -> Config {
+        std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    }
+
+    pub fn save_to(&self, p: &std::path::Path) -> Result<(), String> {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let s = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&p, s).map_err(|e| format!("couldn't save settings to {}: {e}", p.display()))
+        std::fs::write(p, s).map_err(|e| format!("couldn't save settings to {}: {e}", p.display()))
     }
 }

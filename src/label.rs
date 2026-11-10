@@ -10,20 +10,23 @@ use windows_sys::Win32::Graphics::Printing::*;
 use windows_sys::Win32::Storage::Xps::*;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 
-/// "Best before: 11 Nov 2026" (today + the product's shelf life from the
-/// spreadsheet, or the default from Settings), or None if switched off.
-pub fn best_before_text(cfg: &Config, product: &Product) -> Option<String> {
-    let days = product.shelf_life_days.unwrap_or(cfg.best_before_days);
-    if days == 0 {
-        return None;
-    }
-    let st = unsafe {
-        let mut st = std::mem::zeroed();
+/// Today's date on this PC as (year, month, day).
+pub fn today() -> (i32, u32, u32) {
+    unsafe {
+        let mut st: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
         GetLocalTime(&mut st);
-        st
-    };
-    let d = crate::date::add_days_formatted(st.wYear as i32, st.wMonth as u32, st.wDay as u32, days as i64);
-    Some(format!("Best before: {d}"))
+        (st.wYear as i32, st.wMonth as u32, st.wDay as u32)
+    }
+}
+
+fn font_index(s: crate::content::Style) -> usize {
+    use crate::content::Style;
+    match s {
+        Style::Title => TITLE,
+        Style::Body => BODY,
+        Style::Bold => BOLD,
+        Style::Footer => FOOTER,
+    }
 }
 
 pub fn wide(s: &str) -> Vec<u16> {
@@ -216,74 +219,16 @@ fn wrap(hdc: HDC, fonts: &Fonts, runs: &[(String, usize)], width: i32, center: b
 
 /// Lays out a whole label. Returns the lines (with y set) and total height.
 pub fn layout(hdc: HDC, fonts: &Fonts, width: i32, product: &Product, cfg: &Config) -> (Vec<Line>, i32) {
-    let mut paras: Vec<(Vec<(String, usize)>, bool, usize, f32)> = Vec::new(); // runs, centre, base font, gap after (in lines)
-    paras.push((vec![(product.name.clone(), TITLE)], true, TITLE, 0.35));
-
-    let ing = |cell: &Vec<crate::xlsx::Run>| -> Vec<(String, usize)> {
-        cell.iter().map(|r| (r.text.clone(), if r.bold { BOLD } else { BODY })).collect()
-    };
-    if product.ingredients.is_empty() {
-        paras.push((vec![("No ingredients listed.".into(), BODY)], false, BODY, 0.0));
-    } else if cfg.one_per_line {
-        paras.push((vec![("Ingredients:".into(), BOLD)], false, BODY, 0.0));
-        for cell in &product.ingredients {
-            paras.push((ing(cell), false, BODY, 0.0));
-        }
-    } else {
-        let mut runs = vec![("Ingredients: ".to_string(), BOLD)];
-        let n = product.ingredients.len();
-        for (i, cell) in product.ingredients.iter().enumerate() {
-            runs.extend(ing(cell));
-            runs.push((if i + 1 < n { ", " } else { "." }.to_string(), BODY));
-        }
-        paras.push((runs, false, BODY, 0.0));
-    }
-    if let Some(m) = product.may_contain.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
-        paras.push((vec![("May contain: ".to_string(), BODY), (m.trim_end_matches('.').to_string() + ".", BOLD)], false, BODY, 0.0));
-    }
-    if !cfg.footer.trim().is_empty() {
-        if let Some(last) = paras.last_mut() {
-            last.3 = 0.35;
-        }
-        paras.push((vec![(cfg.footer.trim().to_string(), FOOTER)], false, FOOTER, 0.0));
-    }
-    if let Some(bb) = best_before_text(cfg, product) {
-        if let Some(last) = paras.last_mut() {
-            last.3 = 0.35;
-        }
-        paras.push((vec![(bb, BOLD)], false, BODY, 0.0));
-    }
-    // Business block, centred: name (bold), address, contact.
-    let business = [(cfg.business_name.trim(), BOLD), (cfg.address.trim(), BODY), (cfg.contact.trim(), BODY)];
-    let mut first = true;
-    for (text, font) in business {
-        if text.is_empty() {
-            continue;
-        }
-        if first {
-            if let Some(last) = paras.last_mut() {
-                last.3 = 0.35;
-            }
-            first = false;
-        }
-        paras.push((vec![(text.to_string(), font)], true, font, 0.0));
-    }
-    if !cfg.warning.trim().is_empty() {
-        if let Some(last) = paras.last_mut() {
-            last.3 = 0.35;
-        }
-        paras.push((vec![(cfg.warning.trim().to_string(), FOOTER)], false, FOOTER, 0.0));
-    }
-
     let mut all = Vec::new();
     let mut y = 0;
-    for (runs, center, base, gap) in paras {
-        for mut l in wrap(hdc, fonts, &runs, width, center, base) {
+    for p in crate::content::paragraphs(product, cfg, today()) {
+        let runs: Vec<(String, usize)> = p.runs.iter().map(|r| (r.text.clone(), font_index(r.style))).collect();
+        for mut l in wrap(hdc, fonts, &runs, width, p.center, font_index(p.base)) {
             l.y = y;
             y += l.height;
             all.push(l);
         }
-        y += (fonts.height[BODY] as f32 * gap) as i32;
+        y += (fonts.height[BODY] as f32 * p.gap_after) as i32;
     }
     (all, y)
 }

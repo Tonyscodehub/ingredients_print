@@ -5,18 +5,20 @@
 //! whole bold cell or bold words inside a cell, is treated as an allergen.
 
 use quick_xml::events::{BytesStart, Event};
+use serde::{Deserialize, Serialize};
 use quick_xml::Reader;
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Run {
     pub text: String,
     pub bold: bool,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Product {
     pub name: String,
     /// One entry per ingredient cell; each cell is a list of runs.

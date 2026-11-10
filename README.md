@@ -4,6 +4,8 @@ A small Windows app that turns a products spreadsheet into one big button per pr
 
 `AllergenLabels.exe` is a single file with nothing to install. It only uses DLLs that come with Windows. A ready-built copy is in [`dist/`](dist/AllergenLabels.exe), and the sample spreadsheet is in [`examples/`](examples/Products.xlsx).
 
+There's also a **web version** that runs in Docker, for a Home Assistant dashboard or any browser. The Windows app does the printing for it. See [Web app and Home Assistant](#web-app-and-home-assistant).
+
 ## The spreadsheet
 
 - The app reads the **first sheet** of an `.xlsx` workbook.
@@ -87,6 +89,68 @@ The TSP100III only prints graphics, so the app prints through the normal Windows
 
 A label too long for the page size set in the driver carries on onto a second page rather than being cut off.
 
+## Web app and Home Assistant
+
+The web app is the same label app as a web page: product buttons, label preview, copies, refresh, adding and checking bought-in products, and the label settings. It reads and writes the same kind of `Products.xlsx`.
+
+The Star TSP100III is plugged into a Windows PC by USB, so the web app can't print to it directly. Instead, the Windows app on that PC runs as a **print helper**. It collects labels printed from the web app and prints them, and it still works on its own as before.
+
+```
+Home Assistant / browser ──► web app (Docker, 192.168.1.128:8443) ◄── Windows app on the PC ──USB──► TSP100III
+                              Products.xlsx, settings, checks          collects and prints labels
+```
+
+### 1. Run the web app
+
+On the machine that runs Blockplan (192.168.1.128):
+
+```
+git clone https://github.com/Tonyscodehub/ingredients_print
+cd ingredients_print
+cp .env.example .env
+docker compose up -d --build
+```
+
+It runs at **https://192.168.1.128:8443**. Blockplan already uses port 443, so this uses 8443; change it with `LABELS_PORT` in `.env`.
+
+- **The spreadsheet** lives in the `data` folder next to `docker-compose.yml`, as `Products.xlsx`. The first time, the sample spreadsheet is put there. Copy your own over it. Settings and checked bought-in products are kept in the same folder.
+- **To edit the spreadsheet in Excel,** the `data` folder needs to be reachable from Windows. Share it (e.g. with Samba), or keep the spreadsheet on the NAS and mount that share into the container in `docker-compose.yml` in place of `./data`. Saved changes are picked up within a minute. Close Excel before adding a bought-in product from the web app, or Excel's next save will overwrite the new column.
+- The web app needs internet access for barcode lookups.
+
+### 2. HTTPS
+
+HTTPS works the same way as Blockplan's. If there's no certificate in the `certs` folder, the web app makes a self-signed one there covering `localhost`, the machine's name, and the addresses in `HTTPS_HOSTNAMES` (192.168.1.128 by default). To use a real certificate, put `cert.pem` and `key.pem` (or `fullchain.pem` and `privkey.pem`, or a `.crt` and `.key` with the same name) in `certs` and restart. `HTTPS=off` in `.env` switches to plain HTTP.
+
+**For Home Assistant this matters:** a page inside a dashboard can't show the browser's "continue anyway" warning, so with a self-signed certificate the label app is blank until each device trusts the certificate. Any one of these fixes it:
+
+- **Reuse Blockplan's certificate.** If your devices already trust it, and it covers 192.168.1.128, mount Blockplan's `certs` folder instead (see the comment in `docker-compose.yml`).
+- **Trust the self-signed certificate** on each computer, tablet, and phone that shows the dashboard, the same way as for Blockplan (install `certs/self-signed-cert.pem` as a trusted root).
+- **Use plain HTTP**, but only if you open Home Assistant itself over plain HTTP (e.g. `http://192.168.1.77:8123`). An HTTPS dashboard can't show an HTTP page.
+
+### 3. Set up the print helper
+
+On the PC with the printer, open the Windows app, then **Settings…**:
+
+1. **Web app server:** `https://192.168.1.128:8443`
+2. Tick **Accept a self-signed certificate** if the web app uses one.
+3. Choose the TSP100III under **Printer**, and **Save**.
+
+The title bar shows "print helper connected to 192.168.1.128", and the web app shows **Printer ready**. Leave the app running (put a shortcut in the Startup folder, set to Run: Minimised, so it starts with Windows). Labels printed while the helper is offline wait up to 10 minutes, then are dropped so nothing prints unexpectedly later.
+
+Labels from the web app use the web app's label settings (business details, warning, sizes, and so on). The printer is always the one chosen on the PC. To stop anyone else on the network collecting print jobs, set `PRINT_HELPER_KEY` in `.env` and put the same key in the Windows app's Settings.
+
+The web app keeps its own list of checked bought-in products, separate from the Windows app's own list, so a product checked in one isn't automatically checked in the other.
+
+### 4. The Home Assistant dashboard
+
+[`homeassistant/dashboard.yaml`](homeassistant/dashboard.yaml) is a full-screen dashboard with the two cameras and the Remootio button across the top, and the label app filling the rest:
+
+1. In Home Assistant: **Settings → Dashboards → Add dashboard → New dashboard from scratch**, then open it.
+2. **⋮ → Edit dashboard → ⋮ → Raw configuration editor**, and paste the file in.
+3. Change the two camera entity IDs and the Remootio entity (its `cover.` entity, from **Settings → Devices & services → Remootio**), and the URL if yours differs. Save.
+
+Pressing the gate button asks for confirmation first. To make the label app taller or shorter, change `aspect_ratio`. Inside the dashboard the label app uses a compact layout (`?embed=1`).
+
 ## Building from source
 
 Rust (stable) with the `x86_64-pc-windows-gnu` target and MinGW-w64 (or build natively on Windows with `cargo build --release`):
@@ -95,5 +159,7 @@ Rust (stable) with the `x86_64-pc-windows-gnu` target and MinGW-w64 (or build na
 rustup target add x86_64-pc-windows-gnu
 cargo build --release --target x86_64-pc-windows-gnu
 ```
+
+The web app (Linux) builds with `cargo build --release --features server --bin labels-server`, or with the Dockerfile.
 
 The spreadsheet reader has tests (`cargo test`) that run on any OS.

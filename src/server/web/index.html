@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allergen Label Printer</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --text: #1d1d1b; --muted: #66665f; --line: #d8d8d2;
+    --accent: #c2552e; --accent-text: #ffffff; --ok: #2e7d4f; --warn: #b26a00; --bad: #b3261e;
+    --btn: #ffffff; --btn-hover: #f7efe9; --shadow: 0 1px 2px rgba(0,0,0,.08);
+    --radius: 10px; --gap: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1b1a; --panel: #262624; --text: #ecece8; --muted: #a6a69e; --line: #3a3a37;
+      --btn: #2d2d2a; --btn-hover: #3a332e; --shadow: none; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.4 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
+    display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header h1 { font-size: 17px; margin: 0 8px 0 0; font-weight: 600; }
+  body.embed header h1 { display: none; }
+  button, select, input, textarea { font: inherit; color: inherit; }
+  .tool { background: var(--btn); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; cursor: pointer; }
+  .tool:hover { background: var(--btn-hover); }
+  .tool.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  label.copies { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  select, input[type=text], input[type=number], textarea { background: var(--btn); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; }
+  #status { flex: 1 1 260px; color: var(--muted); font-size: 13.5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status.error { color: var(--bad); white-space: normal; }
+  .pill { font-size: 13px; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); white-space: nowrap; cursor: default; }
+  .pill::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; background: var(--warn); vertical-align: 1px; }
+  .pill.ok::before { background: var(--ok); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #grid-wrap { flex: 1; overflow-y: auto; position: relative; }
+  #grid { display: grid; gap: var(--gap); padding: var(--gap); }
+  .product { border: 1px solid var(--line); border-radius: var(--radius); background: var(--btn); box-shadow: var(--shadow);
+    font-weight: 700; cursor: pointer; padding: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; line-height: 1.15; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: manipulation; }
+  .product:hover { background: var(--btn-hover); }
+  .product:active { transform: scale(.985); }
+  .product .sub { font-weight: 500; font-size: .55em; color: var(--warn); margin-top: .35em; }
+  .product.busy { opacity: .6; }
+  #empty { padding: 40px 24px; text-align: center; color: var(--muted); }
+  aside { width: 340px; flex: none; border-left: 1px solid var(--line); padding: 10px 16px; overflow-y: auto; background: var(--bg); }
+  aside h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
+  @media (max-width: 760px) { aside { display: none; } }
+  .label { background: #fff; color: #000; border: 1px solid #b0b0b0; border-radius: 2px; }
+  .label p { margin: 0; overflow-wrap: anywhere; }
+  .label .c { text-align: center; }
+  .label .title { font-weight: 700; }
+  .label .bold { font-weight: 700; }
+  .label .footer { font-style: italic; }
+  #preview-hint { color: var(--muted); text-align: center; margin-top: 16px; font-size: 13.5px; }
+  dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; background: var(--panel); color: var(--text); width: min(680px, 94vw); max-height: 92vh; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog form { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  dialog h3 { margin: 0; font-size: 18px; }
+  .row { display: grid; grid-template-columns: 210px 1fr; gap: 10px; align-items: center; }
+  @media (max-width: 560px) { .row { grid-template-columns: 1fr; gap: 4px; } }
+  .row > label { color: var(--muted); }
+  .inline { display: flex; gap: 8px; align-items: center; }
+  .inline input { flex: 1; min-width: 0; }
+  .note { color: var(--muted); font-size: 13.5px; margin: 0; }
+  .msg { font-size: 14px; margin: 0; min-height: 1.4em; }
+  .warnbox { border-left: 3px solid var(--warn); padding: 6px 10px; background: color-mix(in srgb, var(--warn) 8%, transparent); font-size: 13.5px; }
+  textarea { width: 100%; min-height: 150px; resize: vertical; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; align-items: center; margin-top: 4px; }
+  .actions .left { margin-right: auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
+  @media (max-width: 560px) { .grid2 { grid-template-columns: 1fr; } }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { color: var(--muted); font-size: 13.5px; }
+  .field.wide { grid-column: 1 / -1; }
+  #toast { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 16px;
+    border-radius: 10px; font-size: 14.5px; max-width: 90vw; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 10; }
+  #toast.show { opacity: 1; }
+  #toast.bad { background: var(--bad); color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Allergen labels</h1>
+  <button class="tool" id="btn-refresh" title="Re-read the spreadsheet now">Refresh</button>
+  <button class="tool" id="btn-add">Add bought-in product…</button>
+  <button class="tool" id="btn-settings">Settings…</button>
+  <label class="copies">Copies <select id="copies"></select></label>
+  <span id="status">Loading…</span>
+  <span class="pill" id="helper" title="">Print helper…</span>
+</header>
+<main>
+  <div id="grid-wrap"><div id="grid"></div><div id="empty" hidden></div></div>
+  <aside>
+    <h2 id="preview-title">Label preview</h2>
+    <div id="preview"></div>
+    <p id="preview-hint">Press a product to print its label. It will be shown here.</p>
+  </aside>
+</main>
+<div id="toast"></div>
+
+<dialog id="dlg-check">
+  <form method="dialog" id="form-check">
+    <h3 id="check-title">Check bought-in product</h3>
+    <p class="note" id="check-info"></p>
+    <p class="msg" id="check-msg"></p>
+    <div class="field">
+      <label for="check-ing">Ingredients – put *asterisks* around each allergen, matching the bold words on the pack</label>
+      <textarea id="check-ing" spellcheck="false"></textarea>
+    </div>
+    <div class="field">
+      <label for="check-may">May contain (from the pack's warning, if it has one)</label>
+      <input type="text" id="check-may">
+    </div>
+    <p class="warnbox">Check every word against the pack before accepting – online information can be wrong or out of date, and recipes change. The shop and manufacturer are never printed on the label.</p>
+    <div class="actions">
+      <button type="button" class="tool left" id="check-relook">Look up again</button>
+      <button type="button" class="tool primary" id="check-accept">Accept and save</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-add">
+  <form method="dialog" id="form-add">
+    <h3>Add bought-in product</h3>
+    <div class="row"><label for="add-bc">Barcode (type it, or scan it)</label>
+      <div class="inline"><input type="text" id="add-bc" inputmode="numeric" autocomplete="off"><button type="button" class="tool" id="add-lookup">Look up</button></div></div>
+    <p class="msg" id="add-msg">Enter a barcode and press Look up (or Enter) to fill in the product name.</p>
+    <div class="row"><label for="add-name">Product name (printed on the label)</label><input type="text" id="add-name" autocomplete="off"></div>
+    <div class="row"><label for="add-shop">Shop (optional, never printed)</label><input type="text" id="add-shop" autocomplete="off"></div>
+    <div class="row"><label for="add-days">Shelf life</label><div><select id="add-days"></select></div></div>
+    <p class="note">This adds a new column to the spreadsheet (a backup copy of the old file is kept), then opens the checking screen so you can check the ingredients against the pack. If the spreadsheet is open in Excel, close it first.</p>
+    <div class="actions">
+      <button type="button" class="tool primary" id="add-go">Add product</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-settings">
+  <form method="dialog" id="form-settings">
+    <h3>Settings</h3>
+    <div class="grid2">
+      <div class="field"><label for="s-business_name">Business name</label><input type="text" id="s-business_name"></div>
+      <div class="field"><label for="s-contact">Contact</label><input type="text" id="s-contact"></div>
+      <div class="field wide"><label for="s-address">Address</label><input type="text" id="s-address"></div>
+      <div class="field wide"><label for="s-footer">Footer line (under the ingredients)</label><input type="text" id="s-footer"></div>
+      <div class="field wide"><label for="s-warning">Warning (bottom of the label)</label><textarea id="s-warning" style="min-height:64px"></textarea></div>
+      <div class="field"><label for="s-best_before_days">Default best before (if the spreadsheet gives no shelf life)</label><select id="s-best_before_days"></select></div>
+      <div class="field"><label for="s-allergens_in_brackets">Allergens are</label>
+        <select id="s-allergens_in_brackets"><option value="true">Text in (brackets)</option><option value="false">Bold text in the spreadsheet</option></select></div>
+      <div class="field"><label for="s-one_per_line">Ingredient layout</label>
+        <select id="s-one_per_line"><option value="false">Comma-separated, like a UK food label</option><option value="true">One ingredient per line</option></select></div>
+      <div class="field"><label for="s-refresh_minutes">Re-read the spreadsheet every (minutes)</label><input type="number" id="s-refresh_minutes" min="1" max="1440"></div>
+      <div class="field"><label for="s-title_pt">Product name size (pt)</label><input type="number" id="s-title_pt" min="6" max="48" step="0.5"></div>
+      <div class="field"><label for="s-body_pt">Ingredient text size (pt)</label><input type="number" id="s-body_pt" min="5" max="30" step="0.5"></div>
+      <div class="field"><label for="s-font_face">Font</label><input type="text" id="s-font_face"></div>
+      <div class="field"><label for="s-label_width_mm">Label width (mm)</label><input type="number" id="s-label_width_mm" min="20" max="120" step="0.5"></div>
+      <div class="field"><label for="s-margin_mm">Extra side margin (mm)</label><input type="number" id="s-margin_mm" min="0" max="20" step="0.5"></div>
+    </div>
+    <p class="note">The printer itself is chosen on the PC, in the Windows app's Settings.</p>
+    <p class="msg" id="s-msg"></p>
+    <div class="actions">
+      <button type="button" class="tool primary" id="s-save">Save</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+if (params.get("embed") === "1" || window.self !== window.top) document.body.classList.add("embed");
+
+let state = null;
+let signature = "";
+let previewName = null;
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opts);
+  let data = null;
+  try { data = await r.json(); } catch (e) { data = null; }
+  if (!r.ok) throw new Error((data && data.error) || ("Error " + r.status));
+  return data;
+}
+
+let toastTimer = null;
+function toast(text, bad) {
+  const t = $("toast");
+  t.textContent = text;
+  t.className = "show" + (bad ? " bad" : "");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (t.className = ""), bad ? 7000 : 3500);
+}
+
+function fillDays(sel, value) {
+  sel.innerHTML = "";
+  for (let d = 1; d <= 10; d++) {
+    const o = document.createElement("option");
+    o.value = d; o.textContent = d + (d === 1 ? " day" : " days");
+    sel.appendChild(o);
+  }
+  sel.value = value;
+}
+for (let i = 1; i <= 10; i++) { const o = document.createElement("option"); o.value = i; o.textContent = i; $("copies").appendChild(o); }
+
+// ---- State -------------------------------------------------------------
+async function loadState() {
+  try {
+    state = await api("/api/state");
+  } catch (e) {
+    $("status").textContent = "Can't reach the label server – retrying…";
+    $("status").className = "error";
+    return;
+  }
+  renderStatus();
+  const sig = JSON.stringify(state.products.map((p) => [p.name, p.needs_check]));
+  if (sig !== signature) { signature = sig; renderButtons(); }
+  renderPreview();
+}
+
+function renderStatus() {
+  const s = $("status");
+  const n = state.products.length;
+  let text = `${n} product${n === 1 ? "" : "s"} loaded from ${state.file} at ${state.loaded_at}`;
+  if (state.unchecked === 1) text += " – 1 bought-in product needs checking before it can print";
+  else if (state.unchecked > 1) text += ` – ${state.unchecked} bought-in products need checking before they can print`;
+  if (state.error) { s.textContent = `Couldn't read the spreadsheet: ${state.error}. ${n ? "Still using the last good list." : ""}`; s.className = "error"; }
+  else { s.textContent = text; s.className = ""; }
+  const h = $("helper");
+  if (state.helper && state.helper.connected) {
+    h.textContent = "Printer ready – " + state.helper.name; h.className = "pill ok";
+    h.title = "The print helper on the PC is connected.";
+  } else {
+    h.textContent = "Print helper offline"; h.className = "pill";
+    h.title = "Labels are printed by the Windows app on the PC with the printer. Start it, and set this server's address in its Settings. Labels you print now wait up to 10 minutes.";
+  }
+}
+
+// ---- Buttons -------------------------------------------------------------
+function plan(n, w, h) {
+  const gap = 12, minw = 140, minh = 70, maxh = 220;
+  let best = null;
+  for (let cols = 1; cols <= Math.max(1, n); cols++) {
+    const bw = Math.floor((w - gap * (cols + 1)) / cols);
+    if (bw < minw && cols > 1) break;
+    const rows = Math.ceil(n / cols);
+    let bh = Math.floor((h - gap * (rows + 1)) / rows);
+    if (bh < minh) continue;
+    bh = Math.min(bh, maxh);
+    const score = Math.min(bw / 2.2, bh);
+    if (!best || score > best.score) best = { score, cols, bw, bh };
+  }
+  if (best) return best;
+  const cols = Math.max(1, Math.min(n, Math.floor((w - gap) / (minw + gap))));
+  return { cols, bw: Math.floor((w - gap * (cols + 1)) / cols), bh: minh + 10 };
+}
+
+function renderButtons() {
+  const grid = $("grid");
+  grid.innerHTML = "";
+  const empty = $("empty");
+  if (!state.products.length) {
+    empty.hidden = false;
+    empty.textContent = "No products yet. Put Products.xlsx in the server's data folder, or press Add bought-in product.";
+    return;
+  }
+  empty.hidden = true;
+  state.products.forEach((p) => {
+    const b = document.createElement("button");
+    b.className = "product";
+    b.type = "button";
+    const name = document.createElement("span");
+    name.textContent = p.name;
+    b.appendChild(name);
+    if (p.needs_check) {
+      const sub = document.createElement("span");
+      sub.className = "sub"; sub.textContent = "check ingredients";
+      b.appendChild(sub);
+    }
+    b.addEventListener("click", () => onProduct(p.name, b));
+    if (p.barcode) {
+      // Right-click or long-press a bought-in product to re-check it.
+      b.addEventListener("contextmenu", (e) => { e.preventDefault(); openCheck(p.name); });
+      let t = null;
+      b.addEventListener("touchstart", () => { t = setTimeout(() => { t = "fired"; openCheck(p.name); }, 650); }, { passive: true });
+      b.addEventListener("touchend", (e) => { if (t === "fired") e.preventDefault(); else clearTimeout(t); t = null; });
+      b.addEventListener("touchmove", () => { clearTimeout(t); t = null; }, { passive: true });
+      b.title = "Right-click or long-press to check its ingredients again";
+    }
+    grid.appendChild(b);
+  });
+  layoutButtons();
+}
+
+function layoutButtons() {
+  const wrap = $("grid-wrap"), grid = $("grid");
+  const buttons = grid.querySelectorAll(".product");
+  const n = buttons.length;
+  if (!n) return;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  let p = plan(n, w, h);
+  const contentH = 12 + Math.ceil(n / p.cols) * (p.bh + 12);
+  if (contentH > h) p = plan(n, w - 16, h);
+  grid.style.gridTemplateColumns = `repeat(${p.cols}, minmax(0, 1fr))`;
+  grid.style.gridAutoRows = p.bh + "px";
+  const longest = Math.max(...state.products.map((x) => x.name.length), 1);
+  const px = Math.max(14, Math.min(36, Math.min(p.bh * 0.24, (p.bw * 2) / (longest * 0.55))));
+  grid.style.fontSize = px + "px";
+}
+window.addEventListener("resize", layoutButtons);
+
+// ---- Preview -------------------------------------------------------------
+function renderPreview() {
+  const box = $("preview");
+  const p = previewName && state.products.find((x) => x.name === previewName);
+  box.innerHTML = "";
+  if (!p || !p.label.length) { $("preview-hint").hidden = false; $("preview-title").textContent = "Label preview"; return; }
+  $("preview-hint").hidden = true;
+  $("preview-title").textContent = "Last label printed";
+  const width = box.clientWidth || 300;
+  const dpi = width / (Math.max(20, state.label_width_mm) / 25.4);
+  const pt = (v) => (v * dpi) / 72 + "px";
+  const label = document.createElement("div");
+  label.className = "label";
+  label.style.padding = (Math.max(0, state.margin_mm) * dpi) / 25.4 + 4 + "px";
+  label.style.fontFamily = `"${state.font_face}", Arial, sans-serif`;
+  const bodyLine = (state.body_pt * dpi) / 72 * 1.15;
+  for (const para of p.label) {
+    const el = document.createElement("p");
+    if (para.center) el.className = "c";
+    el.style.lineHeight = "1.15";
+    el.style.marginBottom = para.gap_after * bodyLine + "px";
+    for (const r of para.runs) {
+      const s = document.createElement("span");
+      s.textContent = r.text;
+      s.className = r.style;
+      s.style.fontSize = pt(r.style === "title" ? state.title_pt : r.style === "footer" ? state.body_pt * 0.85 : state.body_pt);
+      el.appendChild(s);
+    }
+    label.appendChild(el);
+  }
+  box.appendChild(label);
+}
+
+// ---- Printing ------------------------------------------------------------
+async function onProduct(name, btn) {
+  const p = state.products.find((x) => x.name === name);
+  if (!p) return;
+  if (p.needs_check) { openCheck(name); return; }
+  previewName = name;
+  renderPreview();
+  const copies = Number($("copies").value) || 1;
+  btn.classList.add("busy");
+  try {
+    const r = await api("/api/print", { name, copies });
+    toast(r.helper_connected ? `Printing ${name}…` : `${name} is waiting – the print helper on the PC isn't connected.`, !r.helper_connected);
+    watchJob(r.id, name);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    setTimeout(() => btn.classList.remove("busy"), 400);
+  }
+}
+
+async function watchJob(id, name) {
+  const until = Date.now() + 11 * 60 * 1000;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 1500));
+    let s;
+    try { s = await api("/api/jobs/" + id); } catch (e) { return; }
+    if (s.state === "done") { toast(s.message || `Printed ${name}`); return; }
+    if (s.state === "failed") { toast(s.message || `Couldn't print ${name}`, true); return; }
+  }
+}
+
+// ---- Dialogs ---------------------------------------------------------------
+document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
+document.querySelectorAll("dialog form").forEach((f) => f.addEventListener("submit", (e) => e.preventDefault()));
+
+$("btn-refresh").addEventListener("click", async () => {
+  try { const r = await api("/api/refresh", {}); toast(`Re-read the spreadsheet – ${r.count} products`); }
+  catch (e) { toast(e.message, true); }
+  loadState();
+});
+
+// Check a bought-in product
+let checkBarcode = null, checkFoundName = "";
+async function openCheck(name) {
+  const p = state.products.find((x) => x.name === name);
+  if (!p || !p.barcode) return;
+  checkBarcode = p.barcode; checkFoundName = "";
+  $("check-title").textContent = "Check " + p.name;
+  $("check-info").textContent = `Barcode ${p.barcode}` + (p.store ? ` – bought from ${p.store}` : "");
+  $("check-ing").value = ""; $("check-may").value = ""; $("check-msg").textContent = "";
+  $("dlg-check").showModal();
+  let info = { checked: null, cached: null };
+  try { info = await api("/api/checked/" + encodeURIComponent(p.barcode)); } catch (e) {}
+  if (info.checked) {
+    $("check-ing").value = info.checked.ingredients; $("check-may").value = info.checked.may_contain;
+    checkFoundName = info.checked.found_name || "";
+    $("check-msg").textContent = `Checked on ${info.checked.checked_on}.` + (checkFoundName ? ` Found online as: ${checkFoundName}.` : "") + " Press Look up again to fetch the latest details.";
+  } else if (info.cached) {
+    showFound(info.cached);
+  } else {
+    lookupForCheck();
+  }
+  $("check-ing").focus();
+}
+function showFound(f) {
+  checkFoundName = [f.name, f.brand].filter(Boolean).join(" – ");
+  let m = `Found on Open Food Facts: ${checkFoundName || "(no name)"}. Make sure this is the same product as the pack.`;
+  if (!f.ingredients) m += " It has no ingredients listed – type them from the pack below.";
+  $("check-msg").textContent = m;
+  $("check-ing").value = f.ingredients || ""; $("check-may").value = f.may_contain || "";
+}
+async function lookupForCheck() {
+  $("check-msg").textContent = "Looking up this barcode on Open Food Facts…";
+  try {
+    const r = await api("/api/lookup", { barcode: checkBarcode });
+    if (r.found) showFound(r.found);
+    else if (r.error) $("check-msg").textContent = `Couldn't look it up: ${r.error}. You can type the ingredients from the pack below.`;
+    else $("check-msg").textContent = "Not found on Open Food Facts. Type the ingredients from the pack below.";
+  } catch (e) { $("check-msg").textContent = e.message; }
+}
+$("check-relook").addEventListener("click", lookupForCheck);
+$("check-accept").addEventListener("click", async () => {
+  try {
+    await api("/api/checked", { barcode: checkBarcode, ingredients: $("check-ing").value, may_contain: $("check-may").value, found_name: checkFoundName });
+    $("dlg-check").close();
+    toast("Checked and saved – it's ready to print.");
+    await loadState();
+  } catch (e) { $("check-msg").textContent = e.message; }
+});
+
+// Add a bought-in product
+$("btn-add").addEventListener("click", () => {
+  $("add-bc").value = ""; $("add-name").value = ""; $("add-shop").value = "";
+  $("add-msg").textContent = "Enter a barcode and press Look up (or Enter) to fill in the product name.";
+  fillDays($("add-days"), state ? state.default_days : 3);
+  $("dlg-add").showModal();
+  $("add-bc").focus();
+});
+async function addLookup() {
+  const bc = $("add-bc").value.trim();
+  if (!bc) return;
+  $("add-msg").textContent = "Looking up this barcode on Open Food Facts…";
+  $("add-name").focus();
+  try {
+    const r = await api("/api/lookup", { barcode: bc });
+    if (r.found) {
+      if (!$("add-name").value.trim() && r.found.name) $("add-name").value = r.found.name;
+      $("add-msg").textContent = `Found: ${r.found.name || "(no name)"}${r.found.brand ? " (" + r.found.brand + ")" : ""}. Change the name if you want it worded differently on the label.`;
+    } else if (r.error) {
+      $("add-msg").textContent = `Couldn't look it up (${r.error}). You can still add it and type the details from the pack.`;
+    } else {
+      $("add-msg").textContent = "Not found on Open Food Facts. You can still add it – type the product name, and the ingredients from the pack on the next screen.";
+    }
+  } catch (e) { $("add-msg").textContent = e.message; }
+}
+$("add-lookup").addEventListener("click", addLookup);
+$("add-bc").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addLookup(); } });
+$("add-go").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/add", { barcode: $("add-bc").value, name: $("add-name").value, shop: $("add-shop").value, shelf_days: Number($("add-days").value) });
+    $("dlg-add").close();
+    signature = "";
+    await loadState();
+    toast(`${r.name} added – check its ingredients against the pack to finish.`);
+    openCheck(r.name);
+  } catch (e) { $("add-msg").textContent = e.message; }
+});
+
+// Settings
+const settingFields = ["business_name", "contact", "address", "footer", "warning", "best_before_days", "allergens_in_brackets", "one_per_line",
+  "refresh_minutes", "title_pt", "body_pt", "font_face", "label_width_mm", "margin_mm"];
+let settingsCache = null;
+$("btn-settings").addEventListener("click", async () => {
+  try { settingsCache = await api("/api/settings"); } catch (e) { toast(e.message, true); return; }
+  fillDays($("s-best_before_days"), Math.min(10, Math.max(1, settingsCache.best_before_days)));
+  for (const k of settingFields) {
+    const el = $("s-" + k);
+    if (k !== "best_before_days") el.value = String(settingsCache[k]);
+  }
+  $("s-msg").textContent = "";
+  $("dlg-settings").showModal();
+});
+$("s-save").addEventListener("click", async () => {
+  const cfg = Object.assign({}, settingsCache);
+  for (const k of settingFields) {
+    const v = $("s-" + k).value;
+    if (typeof settingsCache[k] === "number") cfg[k] = Number(v);
+    else if (typeof settingsCache[k] === "boolean") cfg[k] = v === "true";
+    else cfg[k] = v;
+  }
+  try {
+    await api("/api/settings", cfg);
+    $("dlg-settings").close();
+    toast("Settings saved.");
+    signature = "";
+    loadState();
+  } catch (e) { $("s-msg").textContent = e.message; }
+});
+
+loadState();
+setInterval(loadState, 5000);
+</script>
+</body>
+</html>

@@ -1,9 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-mod config;
-mod date;
-mod lookup;
-mod xlsx;
+#[allow(unused_imports)]
+pub(crate) use allergen_labels::{config, content, date, helper, lookup, xlsx};
 
 #[cfg(windows)]
 mod http;

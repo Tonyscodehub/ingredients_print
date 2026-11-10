@@ -4,15 +4,35 @@ version = "1.0.0"
 edition = "2021"
 description = "Prints product ingredient labels (allergens in bold) from a spreadsheet to a Star TSP100III"
 
+[lib]
+name = "allergen_labels"
+path = "src/lib.rs"
+
 [[bin]]
 name = "AllergenLabels"
 path = "src/main.rs"
+
+[[bin]]
+name = "labels-server"
+path = "src/server/main.rs"
+required-features = ["server"]
+
+[features]
+server = ["dep:axum", "dep:axum-server", "dep:tokio", "dep:rustls", "dep:rcgen", "dep:ureq", "dep:chrono"]
 
 [dependencies]
 zip = { version = "2", default-features = false, features = ["deflate"] }
 quick-xml = "0.36"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Web server only (cargo build --features server --bin labels-server)
+axum = { version = "0.8", optional = true }
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"], optional = true }
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"], optional = true }
+ureq = { version = "2", default-features = false, features = ["tls", "json"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -1,0 +1,26 @@
+services:
+  labels:
+    build: .
+    ports:
+      # The port people use to reach the label app. Set LABELS_PORT in .env to change it.
+      # (Blockplan already uses 443 on the same machine.)
+      - "${LABELS_PORT:-8443}:8080"
+    environment:
+      DATA_DIR: /data
+      CERT_DIR: /certs
+      PORT: "8080"
+      LABELS_PORT: ${LABELS_PORT:-8443}
+      TZ: ${TZ:-Europe/London}
+      # self-signed (default) | auto | on | off – see "HTTPS" in the README
+      HTTPS: ${HTTPS:-self-signed}
+      # Names/addresses people use to reach it, added to the self-signed certificate.
+      HTTPS_HOSTNAMES: ${HTTPS_HOSTNAMES:-192.168.1.128}
+      # Optional: if set, the Windows print helper must use the same key.
+      PRINT_HELPER_KEY: ${PRINT_HELPER_KEY:-}
+    volumes:
+      # Products.xlsx, settings and checked products live here.
+      - ./data:/data
+      # Certificates. To reuse Blockplan's (so devices that already trust it don't
+      # warn), replace this line with:  - ../blockplan/certs:/certs:ro
+      - ./certs:/certs
+    restart: unless-stopped

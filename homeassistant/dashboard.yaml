@@ -1,0 +1,48 @@
+# Home Assistant dashboard: two cameras and the Remootio button across the top,
+# the allergen label app filling the rest of the screen.
+#
+# To use it: Settings → Dashboards → Add dashboard → "New dashboard from scratch",
+# open it, ⋮ → Edit dashboard → ⋮ → Raw configuration editor, paste this in, and
+# change the three entity IDs and the URL marked CHANGE below.
+
+title: PoFfles
+views:
+  - title: Labels
+    path: labels
+    icon: mdi:label-outline
+    panel: true
+    cards:
+      - type: vertical-stack
+        cards:
+          - type: horizontal-stack
+            cards:
+              - type: picture-entity
+                entity: camera.camera_1          # CHANGE to your first camera
+                camera_view: live
+                show_name: false
+                show_state: false
+                tap_action:
+                  action: more-info
+              - type: picture-entity
+                entity: camera.camera_2          # CHANGE to your second camera
+                camera_view: live
+                show_name: false
+                show_state: false
+                tap_action:
+                  action: more-info
+              - type: button
+                entity: cover.remootio           # CHANGE to your Remootio entity
+                name: Gate
+                icon: mdi:gate
+                show_state: true
+                tap_action:
+                  action: toggle
+                  confirmation:
+                    text: Open or close the gate?
+                hold_action:
+                  action: more-info
+          - type: iframe
+            # CHANGE if the label app runs at a different address or port.
+            url: https://192.168.1.128:8443/?embed=1
+            # Height of the label app as a percentage of its width; raise it to make it taller.
+            aspect_ratio: 62%
