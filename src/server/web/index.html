@@ -46,6 +46,14 @@
   #grid.compact .product { padding: 4px 6px; border-radius: 8px; }
   #grid.compact .product .sub { font-size: .7em; margin-top: .1em; }
   .product.busy { opacity: .6; }
+  .product { position: relative; }
+  .product .del { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 6px; display: flex;
+    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
+  .product .del svg { width: 16px; height: 16px; }
+  .product .del:hover { opacity: 1; color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
+  #grid.compact .product .del { top: 2px; right: 2px; width: 20px; height: 20px; }
+  #grid.compact .product .del svg { width: 13px; height: 13px; }
+  .tool.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
   #empty { padding: 40px 24px; text-align: center; color: var(--muted); }
   aside { width: 340px; flex: none; border-left: 1px solid var(--line); padding: 10px 16px; overflow-y: auto; background: var(--bg); }
   aside h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
@@ -142,6 +150,18 @@
   </form>
 </dialog>
 
+<dialog id="dlg-delete">
+  <form method="dialog">
+    <h3 id="del-title">Delete product?</h3>
+    <p class="note" id="del-text"></p>
+    <p class="msg" id="del-msg"></p>
+    <div class="actions">
+      <button type="button" class="tool danger" id="del-go">Delete</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-settings">
   <form method="dialog" id="form-settings">
     <h3>Settings</h3>
@@ -215,6 +235,8 @@ for (let i = 1; i <= 10; i++) { const o = document.createElement("option"); o.va
 async function loadState() {
   try {
     state = await api("/api/state");
+    // Always A to Z (numbers in natural order, e.g. 2 before 10).
+    state.products.sort((a, b) => a.name.localeCompare(b.name, "en-GB", { numeric: true, sensitivity: "base" }));
   } catch (e) {
     $("status").textContent = "Can't reach the label server – retrying…";
     $("status").className = "error";
@@ -287,6 +309,15 @@ function renderButtons() {
       sub.className = "sub"; sub.textContent = "check ingredients";
       b.appendChild(sub);
     }
+    const del = document.createElement("span");
+    del.className = "del";
+    del.setAttribute("role", "button");
+    del.setAttribute("aria-label", "Delete " + p.name);
+    del.title = "Delete " + p.name;
+    del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/><path d="M10 11v6M14 11v6"/></svg>';
+    del.addEventListener("click", (e) => { e.stopPropagation(); openDelete(p.name); });
+    del.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+    b.appendChild(del);
     b.addEventListener("click", () => onProduct(p.name, b));
     if (p.barcode) {
       // Right-click or long-press a bought-in product to re-check it.
@@ -481,6 +512,26 @@ $("add-go").addEventListener("click", async () => {
     toast(`${r.name} added – check its ingredients against the pack to finish.`);
     openCheck(r.name);
   } catch (e) { $("add-msg").textContent = e.message; }
+});
+
+// Delete a product
+let deleteName = null;
+function openDelete(name) {
+  deleteName = name;
+  $("del-title").textContent = `Delete ${name}?`;
+  $("del-text").textContent = `This removes ${name} and its column from the spreadsheet. The spreadsheet as it was is kept as a backup copy (Products (backup).xlsx) in case you need it back. If the spreadsheet is open in Excel, close it first.`;
+  $("del-msg").textContent = "";
+  $("dlg-delete").showModal();
+}
+$("del-go").addEventListener("click", async () => {
+  try {
+    await api("/api/delete", { name: deleteName });
+    $("dlg-delete").close();
+    if (previewName === deleteName) previewName = null;
+    toast(`${deleteName} deleted.`);
+    signature = "";
+    await loadState();
+  } catch (e) { $("del-msg").textContent = e.message; }
 });
 
 // Settings

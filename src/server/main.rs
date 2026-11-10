@@ -203,6 +203,7 @@ async fn main() {
         .route("/api/checked/{barcode}", get(api_get_checked))
         .route("/api/checked", post(api_set_checked))
         .route("/api/add", post(api_add))
+        .route("/api/delete", post(api_delete))
         .route("/api/helper/next", get(api_helper_next))
         .route("/api/helper/result", post(api_helper_result))
         .with_state(state.clone());
@@ -539,6 +540,38 @@ async fn api_set_checked(State(app): State<App>, Json(req): Json<CheckReq>) -> R
     );
     if let Err(e) = store.save_to(&path) {
         return err(StatusCode::INTERNAL_SERVER_ERROR, e);
+    }
+    let a = app.clone();
+    let _ = tokio::task::spawn_blocking(move || a.reload()).await;
+    Json(json!({ "ok": true })).into_response()
+}
+
+#[derive(Deserialize)]
+struct DeleteReq {
+    name: String,
+}
+
+async fn api_delete(State(app): State<App>, Json(req): Json<DeleteReq>) -> Response {
+    let barcode = {
+        let g = app.inner.lock().unwrap();
+        match g.products.iter().find(|p| p.name == req.name) {
+            Some(p) => p.barcode.clone(),
+            None => return err(StatusCode::NOT_FOUND, "That product isn't in the spreadsheet any more."),
+        }
+    };
+    let path = app.spreadsheet();
+    let name = req.name.clone();
+    let res = tokio::task::spawn_blocking(move || xlsx::remove_product_column(&path, &name)).await.unwrap_or_else(|_| Err("failed".into()));
+    if let Err(e) = res {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("Couldn't delete it from the spreadsheet: {e}"));
+    }
+    // Forget its checked details too, so re-adding the same barcode means checking it again.
+    if let Some(bc) = barcode {
+        let cp = app.checked_path();
+        let mut store = lookup::Store::load_from(&cp);
+        if store.products.remove(&bc).is_some() {
+            let _ = store.save_to(&cp);
+        }
     }
     let a = app.clone();
     let _ = tokio::task::spawn_blocking(move || a.reload()).await;

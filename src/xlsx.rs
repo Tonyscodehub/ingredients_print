@@ -763,39 +763,127 @@ pub fn append_product_column(path: &Path, values: &[String]) -> Result<(), Strin
         }
     }
 
-    // Rebuild the zip, copying every other part unchanged.
-    let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for i in 0..zip.len() {
-        let f = zip.by_index_raw(i).map_err(|e| e.to_string())?;
-        if f.name() == sheet_path {
-            drop(f);
-            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-            out.start_file(sheet_path.as_str(), opts).map_err(|e| e.to_string())?;
-            std::io::Write::write_all(&mut out, xml.as_bytes()).map_err(|e| e.to_string())?;
-        } else {
-            out.raw_copy_file(f).map_err(|e| e.to_string())?;
-        }
-    }
-    let new_bytes = out.finish().map_err(|e| e.to_string())?.into_inner();
+    let new_bytes = rebuild_zip(&mut zip, &sheet_path, &xml)?;
 
     // Sanity check before touching the real file.
     let check = read_products_from_bytes(new_bytes.clone(), Marking::Bold)?;
     if !check.iter().any(|p| p.name == values[0]) {
         return Err("the new column didn't read back correctly, so the spreadsheet was left unchanged".into());
     }
+    save_with_backup(path, &bytes, &new_bytes)
+}
 
+/// Rebuilds the workbook with a new first-sheet XML, copying every other part unchanged.
+fn rebuild_zip(zip: &mut Zip, sheet_path: &str, xml: &str) -> Result<Vec<u8>, String> {
+    let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..zip.len() {
+        let f = zip.by_index_raw(i).map_err(|e| e.to_string())?;
+        if f.name() == sheet_path {
+            drop(f);
+            let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            out.start_file(sheet_path, opts).map_err(|e| e.to_string())?;
+            std::io::Write::write_all(&mut out, xml.as_bytes()).map_err(|e| e.to_string())?;
+        } else {
+            out.raw_copy_file(f).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(out.finish().map_err(|e| e.to_string())?.into_inner())
+}
+
+/// Keeps the old file as "<name> (backup).xlsx", then swaps the new one in.
+fn save_with_backup(path: &Path, old_bytes: &[u8], new_bytes: &[u8]) -> Result<(), String> {
     let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Products".into());
     let backup = path.with_file_name(format!("{stem} (backup).xlsx"));
-    let _ = std::fs::write(&backup, &bytes);
+    let _ = std::fs::write(&backup, old_bytes);
     let tmp = path.with_file_name(format!("~{stem}.tmp"));
-    std::fs::write(&tmp, &new_bytes).map_err(|e| format!("couldn't write next to the spreadsheet: {e}"))?;
+    std::fs::write(&tmp, new_bytes).map_err(|e| format!("couldn't write next to the spreadsheet: {e}"))?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "couldn't save the spreadsheet ({e}). If it's open in Excel, close it and try again"
-        ));
+        return Err(format!("couldn't save the spreadsheet ({e}). If it's open in Excel, close it and try again"));
     }
     Ok(())
+}
+
+/// Removes a product's whole column from the first sheet. Columns to its right
+/// move one to the left, unless the sheet has merged cells, tables, filters, or
+/// similar ranges, in which case the column is just emptied so those stay valid.
+/// The original is kept as "<name> (backup).xlsx".
+pub fn remove_product_column(path: &Path, name: &str) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).map_err(|_| "this doesn't look like an .xlsx file".to_string())?;
+    let sheet_path = first_sheet_path(&mut zip)?;
+    let xf_bold = bold_by_style(&mut zip);
+    let shared = match entry(&mut zip, "xl/sharedStrings.xml") {
+        Some(s) => parse_shared_strings(&s)?,
+        None => Vec::new(),
+    };
+    let xml = entry(&mut zip, &sheet_path).ok_or("worksheet is missing")?;
+    let cells = parse_sheet(&xml, &shared, &xf_bold)?;
+    let before = build_products(parse_sheet(&xml, &shared, &xf_bold)?, Marking::Bold).len();
+    let header_row = cells.iter().map(|c| c.row).min().ok_or("the spreadsheet is empty")?;
+    let target = cells
+        .iter()
+        .find(|c| c.row == header_row && plain(&c.runs) == name)
+        .map(|c| c.col)
+        .ok_or_else(|| format!("\"{name}\" isn't in the spreadsheet any more"))?;
+    let can_shift = !["<mergeCell", "<tableParts", "<autoFilter", "<conditionalFormatting", "<dataValidation", "<hyperlink", "<f>", "<f "]
+        .iter()
+        .any(|t| xml.contains(t));
+
+    let mut new_xml = String::with_capacity(xml.len());
+    let mut last = 0;
+    for (_, start, end) in find_rows(&xml) {
+        new_xml.push_str(&xml[last..start]);
+        let row = &xml[start..end];
+        let tag_end = row.find('>').unwrap();
+        let mut open = row[..=tag_end].to_string();
+        if open.ends_with("/>") {
+            new_xml.push_str(&open);
+            last = end;
+            continue;
+        }
+        if let Some(sp) = tag_attr(&open, "spans") {
+            open = open.replace(&format!(" spans=\"{sp}\""), "");
+        }
+        let body = &row[tag_end + 1..row.len() - "</row>".len()];
+        let mut new_body = String::new();
+        let mut pos = 0;
+        for (col, cs, ce, _) in find_cells(body) {
+            new_body.push_str(&body[pos..cs]);
+            let cell = &body[cs..ce];
+            if col == target {
+                // drop it
+            } else if col > target && can_shift {
+                let ctag_end = cell.find('>').unwrap();
+                let ctag = &cell[..=ctag_end];
+                let moved = match tag_attr(ctag, "r").as_deref().and_then(cell_ref) {
+                    Some((c, r)) => {
+                        let old = format!(" r=\"{}\"", tag_attr(ctag, "r").unwrap());
+                        let new = format!(" r=\"{}{r}\"", col_letters(c - 1));
+                        format!("{}{}", ctag.replacen(&old, &new, 1), &cell[ctag_end + 1..])
+                    }
+                    None => cell.to_string(),
+                };
+                new_body.push_str(&moved);
+            } else {
+                new_body.push_str(cell);
+            }
+            pos = ce;
+        }
+        new_body.push_str(&body[pos..]);
+        new_xml.push_str(&open);
+        new_xml.push_str(&new_body);
+        new_xml.push_str("</row>");
+        last = end;
+    }
+    new_xml.push_str(&xml[last..]);
+
+    let new_bytes = rebuild_zip(&mut zip, &sheet_path, &new_xml)?;
+    let check = read_products_from_bytes(new_bytes.clone(), Marking::Bold)?;
+    if check.iter().any(|p| p.name == name) || check.len() + 1 != before {
+        return Err("the change didn't read back correctly, so the spreadsheet was left unchanged".into());
+    }
+    save_with_backup(path, &bytes, &new_bytes)
 }
 
 fn read_products_from_bytes(bytes: Vec<u8>, marking: Marking) -> Result<Vec<Product>, String> {
@@ -835,6 +923,26 @@ mod write_tests {
         assert!(dir.join("Products (backup).xlsx").exists());
         // Earlier products untouched.
         assert_eq!(ps[0], read_products(&src, Marking::Brackets).unwrap()[0]);
+        println!("{}", p.display());
+    }
+
+    #[test]
+    fn removes_a_column() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/Products.xlsx");
+        let dir = std::env::temp_dir().join("allergen_remove_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Products.xlsx");
+        std::fs::copy(&src, &p).unwrap();
+        let orig = read_products(&p, Marking::Brackets).unwrap();
+        remove_product_column(&p, "Chocolate Brownie").unwrap();
+        let ps = read_products(&p, Marking::Brackets).unwrap();
+        assert_eq!(ps.len(), orig.len() - 1);
+        assert!(ps.iter().all(|x| x.name != "Chocolate Brownie"));
+        // Everything else is unchanged, including the products that moved left.
+        let expect: Vec<_> = orig.into_iter().filter(|x| x.name != "Chocolate Brownie").collect();
+        assert_eq!(ps, expect);
+        assert!(remove_product_column(&p, "Nope").is_err());
         println!("{}", p.display());
     }
 }

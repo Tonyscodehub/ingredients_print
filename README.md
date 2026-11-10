@@ -93,6 +93,8 @@ A label too long for the page size set in the driver carries on onto a second pa
 
 The web app is the same label app as a web page: product buttons, label preview, copies, refresh, adding and checking bought-in products, and the label settings. It reads and writes the same kind of `Products.xlsx`.
 
+On the web page, products are always shown A to Z, and the buttons shrink to fit the screen before any scrolling is needed. The small bin at the top right of a button deletes that product: after you confirm, its column is removed from the spreadsheet (the previous version is kept as `Products (backup).xlsx`).
+
 The Star TSP100III is plugged into a Windows PC by USB, so the web app can't print to it directly. Instead, the Windows app on that PC runs as a **print helper**. It collects labels printed from the web app and prints them, and it still works on its own as before.
 
 ```
