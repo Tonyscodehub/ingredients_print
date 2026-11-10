@@ -160,7 +160,7 @@ Here the label app is reached at **https://labels.johncock.co.uk**, through HAPr
 2. **⋮ → Edit dashboard → ⋮ → Raw configuration editor**, and paste the file in.
 3. Check the Remootio entity (its `cover.` entity, from **Settings → Devices & services → Remootio**) and the URL match yours. Save.
 
-Pressing the gate bar asks for confirmation first. To make the label app taller or shorter, change `aspect_ratio`. Inside the dashboard the label app uses a compact layout (`?embed=1`).
+One tap on the gate opens or closes it (press and hold for the full controls). To make the label app taller or shorter, change `aspect_ratio`. Inside the dashboard the label app uses a compact layout (`?embed=1`).
 
 ## Building from source
 

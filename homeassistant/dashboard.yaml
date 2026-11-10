@@ -18,20 +18,19 @@ views:
             entity: cover.remootio_device_host_192_168_1_16_s_n_083af20d23c4byyrkdpy_none   # Remootio
             name: Gate
             icon: mdi:gate
-            vertical: false
+            vertical: true           # icon, name, and Open/Closed centred, compact
+            # One tap opens or closes the gate; press and hold for the full controls.
             tap_action:
               action: toggle
-              confirmation:
-                text: Open or close the gate?
             icon_tap_action:
               action: toggle
-              confirmation:
-                text: Open or close the gate?
             hold_action:
               action: more-info
           - type: iframe
             # Served through HAProxy on OPNsense with the *.johncock.co.uk certificate (LAN only).
             url: https://labels.johncock.co.uk/?embed=1
-            # Height as a percentage of width. 57% fills a 1920 x 1080 screen with the
-            # HA sidebar showing; use about 51% if the sidebar is hidden.
-            aspect_ratio: 57%
+            # Height as a percentage of width, so the page never scrolls. 40% suits a
+            # 1920 x 1080 screen with a maximised browser (address bar showing) and the
+            # HA sidebar as icons only. Raise it if there's a gap at the bottom, lower it
+            # if the dashboard scrolls.
+            aspect_ratio: 40%
