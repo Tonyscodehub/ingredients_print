@@ -16,7 +16,7 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const APP_TITLE: &str = "Allergen Label Printer";
@@ -48,12 +48,17 @@ const S_MARKING: i32 = 2018;
 const S_SERVER: i32 = 2019;
 const S_KEY: i32 = 2020;
 const S_SELFSIGNED: i32 = 2021;
+const S_TRAY: i32 = 2022;
+const S_AUTOSTART: i32 = 2023;
 
 const TIMER_POLL: usize = 1;
 const WM_APP_STATUS: u32 = WM_APP + 1;
 const WM_APP_LOOKUP: u32 = WM_APP + 2;
 const WM_APP_RECHECK: u32 = WM_APP + 3;
 const WM_APP_TITLE: u32 = WM_APP + 4;
+const WM_APP_TRAY: u32 = WM_APP + 5;
+const ID_TRAY_OPEN: usize = 9001;
+const ID_TRAY_EXIT: usize = 9002;
 
 const C_INFO: i32 = 3001;
 const C_FOUND: i32 = 3002;
@@ -182,6 +187,19 @@ fn set_status(t: &str) {
 
 pub fn run() {
     unsafe {
+        // One copy only: if it's already running (e.g. started with Windows), bring that one forward.
+        let mutex_name = wide("Local\\AllergenLabelPrinter.SingleInstance");
+        windows_sys::Win32::Foundation::SetLastError(0);
+        let _mutex = windows_sys::Win32::System::Threading::CreateMutexW(null(), 0, mutex_name.as_ptr());
+        if GetLastError() == 183 /* ERROR_ALREADY_EXISTS */ {
+            let cls = wide("AllergenMain");
+            let existing = FindWindowW(cls.as_ptr(), null());
+            if !existing.is_null() {
+                ShowWindow(existing, SW_RESTORE);
+                SetForegroundWindow(existing);
+            }
+            return;
+        }
         let hinst = GetModuleHandleW(null());
         let sdc = GetDC(null_mut());
         DPI.store(GetDeviceCaps(sdc, LOGPIXELSY as _).max(96), Ordering::Relaxed);
@@ -223,9 +241,10 @@ pub fn run() {
         lf.lfHeight = (lf.lfHeight as f32 * 1.15) as i32;
         let ui_font = CreateFontIndirectW(&lf);
 
+        let (loaded_cfg, settings_warning) = Config::load_checked();
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
-                cfg: Config::load(),
+                cfg: loaded_cfg,
                 products: Vec::new(),
                 hinst,
                 main: null_mut(),
@@ -296,10 +315,21 @@ pub fn run() {
             a.tools = vec![refresh, settings, add, lbl, copies, status];
         });
 
+        if autostart_enabled() {
+            let _ = set_autostart(true); // keeps the entry pointing at this exe if it was moved
+        }
+        if let Some(w) = settings_warning {
+            message_box(main, &w, MB_ICONWARNING);
+        }
         reload(false);
         start_helper();
         SetTimer(main, TIMER_POLL, 60_000, None);
-        ShowWindow(main, SW_SHOWDEFAULT);
+        let to_tray = with(|a| a.cfg.start_in_tray).unwrap_or(false);
+        if to_tray {
+            tray_add(main);
+        } else {
+            ShowWindow(main, SW_SHOWDEFAULT);
+        }
         layout_main();
         UpdateWindow(main);
 
@@ -665,7 +695,27 @@ fn on_product(idx: usize) {
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match msg {
         WM_SIZE => {
+            if wp == 1 /* SIZE_MINIMIZED */ && with(|a| a.cfg.start_in_tray).unwrap_or(false) {
+                tray_add(hwnd);
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
             layout_main();
+            0
+        }
+        WM_APP_TRAY => {
+            match loword(lp as usize) {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => show_from_tray(hwnd),
+                WM_RBUTTONUP | WM_CONTEXTMENU => tray_menu(hwnd),
+                _ => {}
+            }
+            0
+        }
+        m if m == taskbar_created() => {
+            // Explorer restarted: put the icon back.
+            if TRAY_ADDED.swap(false, Ordering::SeqCst) {
+                tray_add(hwnd);
+            }
             0
         }
         WM_GETMINMAXINFO => {
@@ -678,6 +728,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 ID_REFRESH => reload(true),
                 ID_SETTINGS => open_settings(),
                 ID_ADD => open_add(),
+                ID_TRAY_OPEN => show_from_tray(hwnd),
+                ID_TRAY_EXIT => {
+                    DestroyWindow(hwnd);
+                }
                 _ => return DefWindowProcW(hwnd, msg, wp, lp),
             }
             0
@@ -706,6 +760,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         WM_APP_TITLE => {
             let b = Box::from_raw(lp as *mut String);
             set_text(hwnd, &b);
+            if TRAY_ADDED.load(Ordering::SeqCst) {
+                tray_set(hwnd, NIM_MODIFY);
+            }
             0
         }
         WM_MOUSEWHEEL => {
@@ -715,6 +772,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             0
         }
         WM_DESTROY => {
+            tray_remove(hwnd);
             PostQuitMessage(0);
             0
         }
@@ -857,7 +915,7 @@ fn open_settings() {
         }
         let cls = wide("AllergenSettings");
         let title = wide("Settings");
-        let (w, h) = (s(660), s(760));
+        let (w, h) = (s(660), s(834));
         let mut mr: RECT = std::mem::zeroed();
         GetWindowRect(main, &mut mr);
         let x = mr.left + ((mr.right - mr.left) - w) / 2;
@@ -996,6 +1054,24 @@ fn open_settings() {
         place(S_KEY, "EDIT", &cfg.server_key, edit, WS_EX_CLIENTEDGE, cx, y, s(160), rh);
         let cb = place(S_SELFSIGNED, "BUTTON", "Accept a self-signed certificate", WS_TABSTOP | 3 /* BS_AUTOCHECKBOX */, 0, cx + s(176), y, s(250), rh);
         SendMessageW(cb, BM_SETCHECK, cfg.server_allow_self_signed as usize, 0);
+        y += step;
+
+        let tc = place(
+            S_TRAY,
+            "BUTTON",
+            "Start minimised in the notification area (minimising also hides it there)",
+            WS_TABSTOP | 3, /* BS_AUTOCHECKBOX */
+            0,
+            cx,
+            y,
+            s(414),
+            rh,
+        );
+        SendMessageW(tc, BM_SETCHECK, cfg.start_in_tray as usize, 0);
+        y += step;
+
+        let ac = place(S_AUTOSTART, "BUTTON", "Start when I sign in to Windows (this Windows user only)", WS_TABSTOP | 3, 0, cx, y, s(414), rh);
+        SendMessageW(ac, BM_SETCHECK, autostart_enabled() as usize, 0);
 
         let by = h - s(100);
         place(S_TEST, "BUTTON", "Print test label", WS_TABSTOP, 0, lx, by, s(150), s(34));
@@ -1014,6 +1090,83 @@ fn fmt_num(v: f32) -> String {
     } else {
         format!("{v:.1}")
     }
+}
+
+/// Saves the Settings window. Returns false (and says why) if a value is invalid.
+fn save_settings(hwnd: HWND) -> bool {
+    let cfg = match read_form(hwnd) {
+        Ok(c) => c,
+        Err(e) => {
+            message_box(hwnd, &e, MB_ICONWARNING);
+            return false;
+        }
+    };
+    let want_autostart = unsafe { SendMessageW(GetDlgItem(hwnd, S_AUTOSTART), BM_GETCHECK, 0, 0) } == 1;
+    if want_autostart != autostart_enabled() {
+        if let Err(e) = set_autostart(want_autostart) {
+            message_box(hwnd, &e, MB_ICONWARNING);
+        }
+    }
+
+    if let Err(e) = cfg.save() {
+        message_box(hwnd, &e, MB_ICONWARNING);
+    }
+    let (path_changed, helper_changed) = with(|a| {
+        let changed = a.cfg.spreadsheet != cfg.spreadsheet
+            || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets;
+        let helper = a.cfg.server_url != cfg.server_url
+            || a.cfg.server_key != cfg.server_key
+            || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed
+            || a.cfg.printer != cfg.printer;
+        a.cfg = cfg;
+        (changed, helper)
+    })
+    .unwrap_or((false, false));
+    close_settings();
+    if helper_changed {
+        start_helper();
+    }
+    if path_changed {
+        with(|a| {
+            a.products.clear();
+            a.last_mtime = None;
+        });
+        reload(true);
+        rebuild_buttons();
+    }
+    invalidate_preview();
+    if let Some((main, on)) = with(|a| (a.main, a.cfg.start_in_tray)) {
+        if on {
+            unsafe { tray_add(main) };
+        } else {
+            unsafe { tray_remove(main) };
+        }
+    }
+    true
+}
+
+/// Cancel / close: if anything was changed, ask whether to save it first.
+fn close_settings_asking(hwnd: HWND) {
+    let current = with(|a| a.cfg.clone()).unwrap_or_default();
+    let autostart_changed = (unsafe { SendMessageW(GetDlgItem(hwnd, S_AUTOSTART), BM_GETCHECK, 0, 0) } == 1) != autostart_enabled();
+    let changed = autostart_changed
+        || match read_form(hwnd) {
+            Ok(c) => c != current,
+            Err(_) => true,
+        };
+    if changed {
+        let t = wide("Save your changes to Settings?");
+        let c = wide(APP_TITLE);
+        match unsafe { MessageBoxW(hwnd, t.as_ptr(), c.as_ptr(), MB_YESNOCANCEL | MB_ICONQUESTION) } {
+            IDYES => {
+                save_settings(hwnd);
+                return;
+            }
+            IDNO => {}
+            _ => return,
+        }
+    }
+    close_settings();
 }
 
 fn close_settings() {
@@ -1068,6 +1221,7 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
     }
     cfg.server_key = get_text(item(S_KEY)).trim().to_string();
     cfg.server_allow_self_signed = unsafe { SendMessageW(item(S_SELFSIGNED), BM_GETCHECK, 0, 0) } == 1;
+    cfg.start_in_tray = unsafe { SendMessageW(item(S_TRAY), BM_GETCHECK, 0, 0) } == 1;
     cfg.address = get_text(item(S_ADDRESS)).trim().to_string();
     cfg.contact = get_text(item(S_CONTACT)).trim().to_string();
     cfg.warning = get_text(item(S_WARNING)).trim().to_string();
@@ -1121,45 +1275,16 @@ unsafe extern "system" fn settings_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
                     }
                     Err(e) => message_box(hwnd, &e, MB_ICONWARNING),
                 },
-                IDOK => match read_form(hwnd) {
-                    Ok(cfg) => {
-                        if let Err(e) = cfg.save() {
-                            message_box(hwnd, &e, MB_ICONWARNING);
-                        }
-                        let (path_changed, helper_changed) = with(|a| {
-                            let changed = a.cfg.spreadsheet != cfg.spreadsheet
-                                || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets;
-                            let helper = a.cfg.server_url != cfg.server_url
-                                || a.cfg.server_key != cfg.server_key
-                                || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed
-                                || a.cfg.printer != cfg.printer;
-                            a.cfg = cfg;
-                            (changed, helper)
-                        })
-                        .unwrap_or((false, false));
-                        close_settings();
-                        if helper_changed {
-                            start_helper();
-                        }
-                        if path_changed {
-                            with(|a| {
-                                a.products.clear();
-                                a.last_mtime = None;
-                            });
-                            reload(true);
-                            rebuild_buttons();
-                        }
-                        invalidate_preview();
-                    }
-                    Err(e) => message_box(hwnd, &e, MB_ICONWARNING),
-                },
-                IDCANCEL => close_settings(),
+                IDOK => {
+                    save_settings(hwnd);
+                }
+                IDCANCEL => close_settings_asking(hwnd),
                 _ => return DefWindowProcW(hwnd, msg, wp, lp),
             }
             0
         }
         WM_CLOSE => {
-            close_settings();
+            close_settings_asking(hwnd);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
@@ -1765,4 +1890,118 @@ fn start_helper() {
             }
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// Notification area (system tray)
+
+static TRAY_ADDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn taskbar_created() -> u32 {
+    static MSG: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *MSG.get_or_init(|| {
+        let n = wide("TaskbarCreated");
+        unsafe { RegisterWindowMessageW(n.as_ptr()) }
+    })
+}
+
+unsafe fn tray_set(hwnd: HWND, action: u32) -> bool {
+    let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+    nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+    nid.hWnd = hwnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_APP_TRAY;
+    nid.hIcon = LoadIconW(GetModuleHandleW(null()), 1usize as *const u16);
+    let title = get_text(hwnd);
+    let tip: Vec<u16> = if title.is_empty() { APP_TITLE.to_string() } else { title }.encode_utf16().take(127).collect();
+    nid.szTip[..tip.len()].copy_from_slice(&tip);
+    Shell_NotifyIconW(action, &nid) != 0
+}
+
+unsafe fn tray_add(hwnd: HWND) {
+    if !TRAY_ADDED.load(Ordering::SeqCst) && tray_set(hwnd, NIM_ADD) {
+        TRAY_ADDED.store(true, Ordering::SeqCst);
+    }
+}
+
+unsafe fn tray_remove(hwnd: HWND) {
+    if TRAY_ADDED.swap(false, Ordering::SeqCst) {
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        // If the window was hidden, make sure it doesn't stay invisible.
+        if IsWindowVisible(hwnd) == 0 {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+    }
+}
+
+unsafe fn show_from_tray(hwnd: HWND) {
+    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_RESTORE);
+    SetForegroundWindow(hwnd);
+}
+
+unsafe fn tray_menu(hwnd: HWND) {
+    let menu = CreatePopupMenu();
+    let open = wide("Open Allergen Label Printer");
+    let exit = wide("Exit");
+    AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN, open.as_ptr());
+    AppendMenuW(menu, MF_SEPARATOR, 0, null());
+    AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, exit.as_ptr());
+    let mut pt = POINT { x: 0, y: 0 };
+    GetCursorPos(&mut pt);
+    SetForegroundWindow(hwnd);
+    TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, null());
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
+// ---------------------------------------------------------------------------
+// Start with Windows, for the current user only (HKCU\...\Run – no admin needed)
+
+const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const RUN_VALUE: &str = "AllergenLabelPrinter";
+
+fn run_key(write: bool) -> Option<windows_sys::Win32::System::Registry::HKEY> {
+    use windows_sys::Win32::System::Registry::*;
+    let key = wide(RUN_KEY);
+    let mut h: HKEY = null_mut();
+    let access = if write { KEY_SET_VALUE | KEY_QUERY_VALUE } else { KEY_QUERY_VALUE };
+    let r = unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, access, &mut h) };
+    (r == 0).then_some(h)
+}
+
+fn autostart_enabled() -> bool {
+    use windows_sys::Win32::System::Registry::*;
+    let Some(h) = run_key(false) else { return false };
+    let name = wide(RUN_VALUE);
+    let r = unsafe { RegQueryValueExW(h, name.as_ptr(), null(), null_mut(), null_mut(), null_mut()) };
+    unsafe { RegCloseKey(h) };
+    r == 0
+}
+
+fn set_autostart(on: bool) -> Result<(), String> {
+    use windows_sys::Win32::System::Registry::*;
+    let Some(h) = run_key(true) else { return Err("couldn't open the Windows start-up settings for this user".into()) };
+    let name = wide(RUN_VALUE);
+    let r = unsafe {
+        if on {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let cmd = wide(&format!("\"{}\"", exe.display()));
+            RegSetValueExW(h, name.as_ptr(), 0, REG_SZ, cmd.as_ptr() as *const u8, (cmd.len() * 2) as u32)
+        } else {
+            let r = RegDeleteValueW(h, name.as_ptr());
+            if r == 2 { 0 } else { r } // already gone is fine
+        }
+    };
+    unsafe { RegCloseKey(h) };
+    if r == 0 {
+        Ok(())
+    } else {
+        Err(format!("couldn't change whether the app starts with Windows (error {r})"))
+    }
 }

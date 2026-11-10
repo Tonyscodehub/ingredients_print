@@ -37,6 +37,8 @@ pub struct Config {
     pub server_key: String,
     /// Print helper: accept the server's self-signed certificate.
     pub server_allow_self_signed: bool,
+    /// Start hidden in the notification area (and minimise to it).
+    pub start_in_tray: bool,
     /// Best before = day printed + this many days. 0 = don't print a date.
     pub best_before_days: u32,
 }
@@ -60,9 +62,10 @@ impl Default for Config {
             warning: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination.".into(),
             best_before_days: 3,
             allergens_in_brackets: true,
-            server_url: String::new(),
+            server_url: "https://192.168.1.128:8443".into(),
             server_key: String::new(),
             server_allow_self_signed: true,
+            start_in_tray: false,
         }
     }
 }
@@ -100,11 +103,36 @@ impl Config {
         std::fs::read_to_string(p).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
     }
 
+    /// Like `load`, but if the settings file exists and can't be read (e.g. it was
+    /// cut short by a power cut), it's kept as settings.damaged.json and a
+    /// message is returned instead of quietly starting from the defaults.
+    pub fn load_checked() -> (Config, Option<String>) {
+        let p = config_path();
+        let Ok(text) = std::fs::read_to_string(&p) else { return (Config::default(), None) };
+        match serde_json::from_str(&text) {
+            Ok(c) => (c, None),
+            Err(_) => {
+                let bad = p.with_file_name("settings.damaged.json");
+                let _ = std::fs::rename(&p, &bad);
+                (
+                    Config::default(),
+                    Some(format!(
+                        "The saved settings couldn't be read, so the defaults are being used. Please check Settings.\n\nThe old file was kept as {}",
+                        bad.display()
+                    )),
+                )
+            }
+        }
+    }
+
     pub fn save_to(&self, p: &std::path::Path) -> Result<(), String> {
         if let Some(d) = p.parent() {
             std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
         }
         let s = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(p, s).map_err(|e| format!("couldn't save settings to {}: {e}", p.display()))
+        // Write to a temporary file and swap it in, so a power cut can't leave a half-written file.
+        let tmp = p.with_extension("json.tmp");
+        std::fs::write(&tmp, s).map_err(|e| format!("couldn't save settings to {}: {e}", p.display()))?;
+        std::fs::rename(&tmp, p).map_err(|e| format!("couldn't save settings to {}: {e}", p.display()))
     }
 }

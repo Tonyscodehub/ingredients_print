@@ -77,7 +77,7 @@ Online information can be wrong, incomplete, or out of date, and the pack is the
 | Warning | Cross-contamination sentence printed at the very bottom |
 | Print test label | Prints the first product using the settings on screen, before you save |
 
-Settings are saved in `%APPDATA%\AllergenLabels\settings.json`.
+Settings are saved in `%APPDATA%\AllergenLabels\settings.json`. If you close Settings with unsaved changes, it asks whether to save them.
 
 ## Star TSP100III setup
 
@@ -137,7 +137,9 @@ On the PC with the printer, open the Windows app, then **Settings…**:
 2. Tick **Accept a self-signed certificate** if the web app uses one.
 3. Choose the TSP100III under **Printer**, and **Save**.
 
-The title bar shows "print helper connected to 192.168.1.128", and the web app shows **Printer ready**. Leave the app running (put a shortcut in the Startup folder, set to Run: Minimised, so it starts with Windows). Labels printed while the helper is offline wait up to 10 minutes, then are dropped so nothing prints unexpectedly later.
+The web app server is filled in as `https://192.168.1.128:8443` to start with; change it if yours differs. The title bar shows "print helper connected to 192.168.1.128", and the web app shows **Printer ready**.
+
+Leave the app running. In Settings, tick **Start when I sign in to Windows** (just for the current Windows user, no admin needed) and **Start minimised in the notification area**, so it starts hidden by the clock. Click its icon there to open it; right-click for **Exit**. Only one copy runs per user: opening it again brings up the one already running. Labels printed while the helper is offline wait up to 10 minutes, then are dropped so nothing prints unexpectedly later.
 
 Labels from the web app use the web app's label settings (business details, warning, sizes, and so on). The printer is always the one chosen on the PC. To stop anyone else on the network collecting print jobs, set `PRINT_HELPER_KEY` in `.env` and put the same key in the Windows app's Settings.
 
