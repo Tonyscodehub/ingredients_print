@@ -141,15 +141,22 @@ Labels from the web app use the web app's label settings (business details, warn
 
 The web app keeps its own list of checked bought-in products, separate from the Windows app's own list, so a product checked in one isn't automatically checked in the other.
 
+### HTTPS through OPNsense (no certificate warnings)
+
+Here the label app is reached at **https://labels.johncock.co.uk**, through HAProxy on OPNsense using the existing `*.johncock.co.uk` Let's Encrypt certificate, so no device needs to trust anything:
+
+- Unbound host override: `labels.johncock.co.uk` → 192.168.1.1 (HAProxy)
+- HAProxy: server `labels-web` (192.168.1.128:8443, SSL, no verify), backend `be-labels`, condition `host-labels`, and rule `rule-labels` (LAN clients only) on the HTTPS frontend
+
 ### 4. The Home Assistant dashboard
 
-[`homeassistant/dashboard.yaml`](homeassistant/dashboard.yaml) is a full-screen dashboard with the two cameras and the Remootio button across the top, and the label app filling the rest:
+[`homeassistant/dashboard.yaml`](homeassistant/dashboard.yaml) is a full-screen dashboard with the Remootio gate bar across the top and the label app filling the rest (sized for a 1920 × 1080 screen). [`homeassistant/security-cameras.yaml`](homeassistant/security-cameras.yaml) shows the two gate cameras side by side:
 
 1. In Home Assistant: **Settings → Dashboards → Add dashboard → New dashboard from scratch**, then open it.
 2. **⋮ → Edit dashboard → ⋮ → Raw configuration editor**, and paste the file in.
-3. Change the two camera entity IDs and the Remootio entity (its `cover.` entity, from **Settings → Devices & services → Remootio**), and the URL if yours differs. Save.
+3. Check the Remootio entity (its `cover.` entity, from **Settings → Devices & services → Remootio**) and the URL match yours. Save.
 
-Pressing the gate button asks for confirmation first. To make the label app taller or shorter, change `aspect_ratio`. Inside the dashboard the label app uses a compact layout (`?embed=1`).
+Pressing the gate bar asks for confirmation first. To make the label app taller or shorter, change `aspect_ratio`. Inside the dashboard the label app uses a compact layout (`?embed=1`).
 
 ## Building from source
 

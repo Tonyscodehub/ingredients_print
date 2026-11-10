@@ -1,9 +1,9 @@
-# Home Assistant dashboard: two cameras and the Remootio button across the top,
-# the allergen label app filling the rest of the screen.
+# Home Assistant dashboard for a 1920 x 1080 screen: the Remootio gate bar across
+# the top, and the allergen label app filling the rest.
 #
 # To use it: Settings → Dashboards → Add dashboard → "New dashboard from scratch",
 # open it, ⋮ → Edit dashboard → ⋮ → Raw configuration editor, paste this in, and
-# check the entity IDs and the URL below match your setup.
+# check the entity ID and URL below match your setup.
 
 title: PoFfles
 views:
@@ -14,35 +14,24 @@ views:
     cards:
       - type: vertical-stack
         cards:
-          - type: horizontal-stack
-            cards:
-              - type: picture-entity
-                entity: camera.gate_low_resolution_channel   # Gate (UniFi Protect)
-                camera_view: live
-                show_name: false
-                show_state: false
-                tap_action:
-                  action: more-info
-              - type: picture-entity
-                entity: camera.gate_lhs_fluent            # Gate LHS (Reolink)
-                camera_view: live
-                show_name: false
-                show_state: false
-                tap_action:
-                  action: more-info
-              - type: button
-                entity: cover.remootio_device_host_192_168_1_16_s_n_083af20d23c4byyrkdpy_none   # Remootio
-                name: Gate
-                icon: mdi:gate
-                show_state: true
-                tap_action:
-                  action: toggle
-                  confirmation:
-                    text: Open or close the gate?
-                hold_action:
-                  action: more-info
+          - type: tile
+            entity: cover.remootio_device_host_192_168_1_16_s_n_083af20d23c4byyrkdpy_none   # Remootio
+            name: Gate
+            icon: mdi:gate
+            vertical: false
+            tap_action:
+              action: toggle
+              confirmation:
+                text: Open or close the gate?
+            icon_tap_action:
+              action: toggle
+              confirmation:
+                text: Open or close the gate?
+            hold_action:
+              action: more-info
           - type: iframe
-            # CHANGE if the label app runs at a different address or port.
-            url: https://192.168.1.128:8443/?embed=1
-            # Height of the label app as a percentage of its width; raise it to make it taller.
-            aspect_ratio: 62%
+            # Served through HAProxy on OPNsense with the *.johncock.co.uk certificate (LAN only).
+            url: https://labels.johncock.co.uk/?embed=1
+            # Height as a percentage of width. 57% fills a 1920 x 1080 screen with the
+            # HA sidebar showing; use about 51% if the sidebar is hidden.
+            aspect_ratio: 57%

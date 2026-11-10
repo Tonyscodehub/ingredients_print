@@ -1,0 +1,30 @@
+# "PoFfles Security Cameras" dashboard: the two gate cameras side by side.
+# (It previously showed the page at http://10.8.0.2:8090.)
+
+title: PoFfles Security Cameras
+views:
+  - title: Cameras
+    path: "0"
+    icon: mdi:cctv
+    panel: true
+    cards:
+      - type: grid
+        columns: 2
+        square: false
+        cards:
+          - type: picture-entity
+            entity: camera.gate_low_resolution_channel   # Gate (UniFi Protect)
+            name: Gate
+            camera_view: live
+            show_name: true
+            show_state: false
+            tap_action:
+              action: more-info
+          - type: picture-entity
+            entity: camera.gate_lhs_fluent               # Gate LHS (Reolink)
+            name: Gate LHS
+            camera_view: live
+            show_name: true
+            show_state: false
+            tap_action:
+              action: more-info
