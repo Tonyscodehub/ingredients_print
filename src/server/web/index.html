@@ -43,6 +43,8 @@
   .product:hover { background: var(--btn-hover); }
   .product:active { transform: scale(.985); }
   .product .sub { font-weight: 500; font-size: .55em; color: var(--warn); margin-top: .35em; }
+  #grid.compact .product { padding: 4px 6px; border-radius: 8px; }
+  #grid.compact .product .sub { font-size: .7em; margin-top: .1em; }
   .product.busy { opacity: .6; }
   #empty { padding: 40px 24px; text-align: center; color: var(--muted); }
   aside { width: 340px; flex: none; border-left: 1px solid var(--line); padding: 10px 16px; overflow-y: auto; background: var(--bg); }
@@ -243,8 +245,10 @@ function renderStatus() {
 }
 
 // ---- Buttons -------------------------------------------------------------
+// Make the buttons as big as possible with no scrolling. Only when they'd be smaller
+// than about a quarter of their usual size (minw x minh) does a scroll bar appear.
 function plan(n, w, h) {
-  const gap = 12, minw = 140, minh = 70, maxh = 220;
+  const gap = n > 24 ? 8 : 12, minw = 100, minh = 44, maxh = 220;
   let best = null;
   for (let cols = 1; cols <= Math.max(1, n); cols++) {
     const bw = Math.floor((w - gap * (cols + 1)) / cols);
@@ -254,11 +258,11 @@ function plan(n, w, h) {
     if (bh < minh) continue;
     bh = Math.min(bh, maxh);
     const score = Math.min(bw / 2.2, bh);
-    if (!best || score > best.score) best = { score, cols, bw, bh };
+    if (!best || score > best.score) best = { score, cols, bw, bh, gap };
   }
   if (best) return best;
   const cols = Math.max(1, Math.min(n, Math.floor((w - gap) / (minw + gap))));
-  return { cols, bw: Math.floor((w - gap * (cols + 1)) / cols), bh: minh + 10 };
+  return { cols, bw: Math.floor((w - gap * (cols + 1)) / cols), bh: minh, gap };
 }
 
 function renderButtons() {
@@ -305,12 +309,15 @@ function layoutButtons() {
   if (!n) return;
   const w = wrap.clientWidth, h = wrap.clientHeight;
   let p = plan(n, w, h);
-  const contentH = 12 + Math.ceil(n / p.cols) * (p.bh + 12);
-  if (contentH > h) p = plan(n, w - 16, h);
+  const contentH = p.gap + Math.ceil(n / p.cols) * (p.bh + p.gap);
+  if (contentH > h) p = plan(n, w - 16, h); // leave room for the scroll bar
+  grid.style.gap = p.gap + "px";
+  grid.style.padding = p.gap + "px";
   grid.style.gridTemplateColumns = `repeat(${p.cols}, minmax(0, 1fr))`;
   grid.style.gridAutoRows = p.bh + "px";
+  grid.classList.toggle("compact", p.bh < 70);
   const longest = Math.max(...state.products.map((x) => x.name.length), 1);
-  const px = Math.max(14, Math.min(36, Math.min(p.bh * 0.24, (p.bw * 2) / (longest * 0.55))));
+  const px = Math.max(12, Math.min(36, Math.min(p.bh * 0.3, (p.bw * 2) / (longest * 0.55))));
   grid.style.fontSize = px + "px";
 }
 window.addEventListener("resize", layoutButtons);
