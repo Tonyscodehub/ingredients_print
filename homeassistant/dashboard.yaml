@@ -3,7 +3,7 @@
 #
 # To use it: Settings → Dashboards → Add dashboard → "New dashboard from scratch",
 # open it, ⋮ → Edit dashboard → ⋮ → Raw configuration editor, paste this in, and
-# change the three entity IDs and the URL marked CHANGE below.
+# check the entity IDs and the URL below match your setup.
 
 title: PoFfles
 views:
@@ -17,21 +17,21 @@ views:
           - type: horizontal-stack
             cards:
               - type: picture-entity
-                entity: camera.camera_1          # CHANGE to your first camera
+                entity: camera.gate_low_resolution_channel   # Gate (UniFi Protect)
                 camera_view: live
                 show_name: false
                 show_state: false
                 tap_action:
                   action: more-info
               - type: picture-entity
-                entity: camera.camera_2          # CHANGE to your second camera
+                entity: camera.gate_lhs_fluent            # Gate LHS (Reolink)
                 camera_view: live
                 show_name: false
                 show_state: false
                 tap_action:
                   action: more-info
               - type: button
-                entity: cover.remootio           # CHANGE to your Remootio entity
+                entity: cover.remootio_device_host_192_168_1_16_s_n_083af20d23c4byyrkdpy_none   # Remootio
                 name: Gate
                 icon: mdi:gate
                 show_state: true
