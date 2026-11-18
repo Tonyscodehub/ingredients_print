@@ -119,26 +119,61 @@ pub fn read_products(path: &Path, marking: Marking) -> Result<Vec<Product>, Stri
 /// Re-marks a cell so only text inside brackets is bold (the brackets
 /// themselves stay regular). Handles nesting and unclosed brackets.
 pub fn bracket_runs(runs: &[Run]) -> Vec<Run> {
+    mark_cell(runs, Marking::Brackets)
+}
+
+/// Works out which text in an ingredient cell is bold (an allergen):
+/// - *asterisks* mark allergens in either mode (the asterisks aren't printed);
+/// - [square brackets] hold a sub-ingredient list and print as round brackets,
+///   without making their contents bold;
+/// - in bracket mode, text inside (round brackets) is bold, as before;
+/// - in bold mode, the spreadsheet's own bold formatting is kept.
+pub fn mark_cell(runs: &[Run], marking: Marking) -> Vec<Run> {
+    let stars = runs.iter().map(|r| r.text.matches('*').count()).sum::<usize>();
+    let use_stars = stars > 0 && stars % 2 == 0;
     let mut out: Vec<Run> = Vec::new();
+    let mut push = |ch: char, bold: bool| match out.last_mut() {
+        Some(last) if last.bold == bold => last.text.push(ch),
+        _ => out.push(Run { text: ch.to_string(), bold }),
+    };
     let mut depth = 0u32;
-    for ch in runs.iter().flat_map(|r| r.text.chars()) {
-        let bold = match ch {
-            '(' => {
-                depth += 1;
-                false
+    let mut star = false;
+    for r in runs {
+        for ch in r.text.chars() {
+            match ch {
+                '*' if use_stars => star = !star,
+                '[' => push('(', false),
+                ']' => push(')', false),
+                '(' if marking == Marking::Brackets => {
+                    depth += 1;
+                    push('(', false)
+                }
+                ')' if marking == Marking::Brackets => {
+                    depth = depth.saturating_sub(1);
+                    push(')', false)
+                }
+                _ => {
+                    let bold = star || if marking == Marking::Brackets { depth > 0 } else { r.bold };
+                    push(ch, bold)
+                }
             }
-            ')' => {
-                depth = depth.saturating_sub(1);
-                false
-            }
-            _ => depth > 0,
-        };
-        match out.last_mut() {
-            Some(last) if last.bold == bold => last.text.push(ch),
-            _ => out.push(Run { text: ch.to_string(), bold }),
         }
     }
     out
+}
+
+/// "May contain: nuts, sesame" -> Some("nuts, sesame")
+pub fn parse_may_contain(text: &str) -> Option<String> {
+    let t = text.trim();
+    let lower = t.to_lowercase();
+    let rest = lower.strip_prefix("may contain")?;
+    let start = t.len() - rest.len();
+    Some(t[start..].trim_start_matches([':', ' ', '-']).trim().trim_end_matches('.').to_string())
+}
+
+/// True for cells that hold settings rather than ingredients.
+pub fn is_special_cell(text: &str) -> bool {
+    parse_shelf_life(text).is_some() || parse_may_contain(text).is_some() || parse_barcode(text).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -502,16 +537,25 @@ fn build_products(cells: Vec<Cell>, marking: Marking) -> Vec<Product> {
                 }
                 continue;
             }
+            if let Some(m) = parse_may_contain(&text) {
+                // Several "May contain:" cells are combined, without repeats.
+                let mut items: Vec<String> =
+                    p.may_contain.iter().flat_map(|s| s.split(',')).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                for it in m.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    if !items.iter().any(|x| x.eq_ignore_ascii_case(it)) {
+                        items.push(it.to_string());
+                    }
+                }
+                p.may_contain = (!items.is_empty()).then(|| items.join(", "));
+                continue;
+            }
             match parse_shelf_life(&text) {
                 Some(days) => {
                     if p.shelf_life_days.is_none() {
                         p.shelf_life_days = days;
                     }
                 }
-                None => p.ingredients.push(match marking {
-                    Marking::Brackets => bracket_runs(&c.runs),
-                    Marking::Bold => c.runs.clone(),
-                }),
+                None => p.ingredients.push(mark_cell(&c.runs, marking)),
             }
         }
     }
@@ -533,6 +577,26 @@ mod tests {
         assert_eq!(parse_shelf_life("shelf-life 10"), Some(Some(10)));
         assert_eq!(parse_shelf_life("Shelf life: tbc"), Some(None));
         assert_eq!(parse_shelf_life("Wheat flour"), None);
+    }
+
+    #[test]
+    fn sub_ingredients_and_stars() {
+        let r = |t: &str, b: bool| Run { text: t.into(), bold: b };
+        let out = mark_cell(&[r("Biscoff biscuits [*wheat* flour, sugar, *soya* flour]", false)], Marking::Brackets);
+        let text: String = out.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(text, "Biscoff biscuits (wheat flour, sugar, soya flour)");
+        let bold: Vec<&str> = out.iter().filter(|x| x.bold).map(|x| x.text.as_str()).collect();
+        assert_eq!(bold, vec!["wheat", "soya"]);
+        // Allergen brackets still work inside a sub-ingredient list.
+        let out = mark_cell(&[r("Spread [biscuits (wheat), oil]", false)], Marking::Brackets);
+        let bold: Vec<&str> = out.iter().filter(|x| x.bold).map(|x| x.text.as_str()).collect();
+        assert_eq!(bold, vec!["wheat"]);
+        // Bold mode keeps spreadsheet bold and adds stars.
+        let out = mark_cell(&[r("Butter ", false), r("milk", true), r(" [*egg* wash]", false)], Marking::Bold);
+        let bold: Vec<&str> = out.iter().filter(|x| x.bold).map(|x| x.text.as_str()).collect();
+        assert_eq!(bold, vec!["milk", "egg"]);
+        assert_eq!(parse_may_contain("May contain: nuts, sesame.").as_deref(), Some("nuts, sesame"));
+        assert_eq!(parse_may_contain("Sugar"), None);
     }
 
     #[test]
@@ -886,6 +950,171 @@ pub fn remove_product_column(path: &Path, name: &str) -> Result<(), String> {
     save_with_backup(path, &bytes, &new_bytes)
 }
 
+/// Replaces a cell tag's r="…" reference.
+fn set_cell_ref(cell: &str, new_ref: &str) -> String {
+    let tag_end = cell.find('>').unwrap_or(cell.len() - 1);
+    let tag = &cell[..=tag_end];
+    let new_tag = match tag_attr(tag, "r") {
+        Some(old) => tag.replacen(&format!(" r=\"{old}\""), &format!(" r=\"{new_ref}\""), 1),
+        None => tag.replacen("<c", &format!("<c r=\"{new_ref}\""), 1),
+    };
+    format!("{new_tag}{}", &cell[tag_end + 1..])
+}
+
+/// Puts a cell's XML into row `row_no`, in column order, creating the row if needed.
+fn put_cell(xml: &mut String, row_no: u32, col: u32, cell: &str) {
+    let rows = find_rows(xml);
+    match rows.iter().find(|r| r.0 == row_no) {
+        Some(&(_, start, end)) => {
+            let row = xml[start..end].to_string();
+            let tag_end = row.find('>').unwrap();
+            let mut open = row[..=tag_end].to_string();
+            if let Some(sp) = tag_attr(&open, "spans") {
+                open = open.replace(&format!(" spans=\"{sp}\""), "");
+            }
+            let self_closing = open.ends_with("/>");
+            if self_closing {
+                open = format!("{}>", open.trim_end_matches("/>"));
+            }
+            let body = if self_closing { String::new() } else { row[tag_end + 1..row.len() - "</row>".len()].to_string() };
+            let found = find_cells(&body);
+            let new_body = match found.iter().find(|c| c.0 >= col) {
+                Some(c) if c.0 == col => format!("{}{}{}", &body[..c.1], cell, &body[c.2..]),
+                Some(c) => format!("{}{}{}", &body[..c.1], cell, &body[c.1..]),
+                None => format!("{body}{cell}"),
+            };
+            xml.replace_range(start..end, &format!("{open}{new_body}</row>"));
+        }
+        None => {
+            let row = format!("<row r=\"{row_no}\">{cell}</row>");
+            let at = rows.iter().find(|r| r.0 > row_no).map(|r| r.1).unwrap_or_else(|| xml.find("</sheetData>").unwrap_or(xml.len()));
+            xml.insert_str(at, &row);
+        }
+    }
+}
+
+/// Takes out every cell of column `col` at or below `from_row`; returns (row, cell XML), top first.
+fn take_column_cells(xml: &mut String, col: u32, from_row: u32) -> Vec<(u32, String)> {
+    let mut taken = Vec::new();
+    for (row_no, start, end) in find_rows(xml).into_iter().rev() {
+        if row_no < from_row {
+            continue;
+        }
+        let row = xml[start..end].to_string();
+        let tag_end = row.find('>').unwrap();
+        if row[..=tag_end].ends_with("/>") {
+            continue;
+        }
+        let body = &row[tag_end + 1..row.len() - "</row>".len()];
+        if let Some(c) = find_cells(body).into_iter().find(|c| c.0 == col) {
+            taken.push((row_no, body[c.1..c.2].to_string()));
+            let new_row = format!("{}{}{}</row>", &row[..=tag_end], &body[..c.1], &body[c.2..]);
+            xml.replace_range(start..end, &new_row);
+        }
+    }
+    taken.reverse();
+    taken
+}
+
+fn inline_cell(r: &str, style: Option<&str>, text: &str) -> String {
+    format!(
+        "<c r=\"{r}\"{} t=\"inlineStr\"><is><t xml:space=\"preserve\">{}</t></is></c>",
+        style.map(|s| format!(" s=\"{s}\"")).unwrap_or_default(),
+        xml_escape(text)
+    )
+}
+
+/// Inserts a new ingredient cell into a product's column, straight after its
+/// ingredient number `after` (0 = first), or before all of them when `after`
+/// is None. Cells below move down one row. Optionally adds a "May contain:"
+/// cell at the bottom of the column. The original is kept as a backup.
+pub fn insert_ingredient(path: &Path, product: &str, after: Option<usize>, text: &str, may_contain: Option<&str>) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).map_err(|_| "this doesn't look like an .xlsx file".to_string())?;
+    let sheet_path = first_sheet_path(&mut zip)?;
+    let xf_bold = bold_by_style(&mut zip);
+    let shared = match entry(&mut zip, "xl/sharedStrings.xml") {
+        Some(s) => parse_shared_strings(&s)?,
+        None => Vec::new(),
+    };
+    let mut xml = entry(&mut zip, &sheet_path).ok_or("worksheet is missing")?;
+    let cells = parse_sheet(&xml, &shared, &xf_bold)?;
+    let before = build_products(parse_sheet(&xml, &shared, &xf_bold)?, Marking::Bold);
+    let old = before.iter().find(|p| p.name == product).ok_or_else(|| format!("\"{product}\" isn't in the spreadsheet any more"))?;
+    if old.barcode.is_some() {
+        return Err("sub-ingredients can only be added to products you make – this one is bought in".into());
+    }
+    let header_row = cells.iter().map(|c| c.row).min().ok_or("the spreadsheet is empty")?;
+    let col = cells
+        .iter()
+        .find(|c| c.row == header_row && plain(&c.runs) == product)
+        .map(|c| c.col)
+        .ok_or_else(|| format!("\"{product}\" isn't in the spreadsheet any more"))?;
+    let mut column: Vec<&Cell> = cells.iter().filter(|c| c.col == col && c.row > header_row).collect();
+    column.sort_by_key(|c| c.row);
+    let ingredient_rows: Vec<u32> = column.iter().filter(|c| !is_special_cell(&plain(&c.runs))).map(|c| c.row).collect();
+    let last_row = column.last().map(|c| c.row).unwrap_or(header_row);
+    let insert_row = match after {
+        None => ingredient_rows.first().copied().unwrap_or(last_row + 1),
+        Some(i) => ingredient_rows.get(i).map(|r| r + 1).ok_or("that ingredient isn't in the list any more – refresh and try again")?,
+    };
+
+    if let Some(i) = xml.find("<sheetData/>") {
+        xml.replace_range(i..i + "<sheetData/>".len(), "<sheetData></sheetData>");
+    }
+    // Style for the new cell: copy the ingredient above it (or below, at the start).
+    let style_row = match after {
+        Some(i) => ingredient_rows.get(i).copied(),
+        None => ingredient_rows.first().copied(),
+    };
+    let style = style_row.and_then(|r| {
+        find_rows(&xml).into_iter().find(|x| x.0 == r).and_then(|(_, s, e)| {
+            let row = &xml[s..e];
+            let te = row.find('>').unwrap();
+            if row[..=te].ends_with("/>") {
+                return None;
+            }
+            find_cells(&row[te + 1..row.len() - 6]).into_iter().find(|c| c.0 == col).and_then(|c| c.3)
+        })
+    });
+    let letters = col_letters(col);
+    let moved = take_column_cells(&mut xml, col, insert_row);
+    for (r, cell) in moved.iter().rev() {
+        put_cell(&mut xml, r + 1, col, &set_cell_ref(cell, &format!("{letters}{}", r + 1)));
+    }
+    put_cell(&mut xml, insert_row, col, &inline_cell(&format!("{letters}{insert_row}"), style.as_deref(), text));
+    if let Some(m) = may_contain.map(str::trim).filter(|m| !m.is_empty()) {
+        let bottom = last_row.max(insert_row) + 2;
+        put_cell(&mut xml, bottom, col, &inline_cell(&format!("{letters}{bottom}"), None, &format!("May contain: {m}")));
+    }
+    // Widen the recorded used range if needed.
+    if let Some(i) = xml.find("<dimension ref=\"") {
+        let s0 = i + "<dimension ref=\"".len();
+        if let Some(e) = xml[s0..].find('"').map(|e| e + s0) {
+            let r = xml[s0..e].to_string();
+            if let Some((c, rw)) = cell_ref(r.split(':').last().unwrap_or("A1")) {
+                let first = r.split(':').next().unwrap_or("A1").to_string();
+                let new_ref = format!("{first}:{}{}", col_letters(c.max(col)), rw.max(last_row + 3));
+                xml.replace_range(s0..e, &new_ref);
+            }
+        }
+    }
+
+    let new_bytes = rebuild_zip(&mut zip, &sheet_path, &xml)?;
+    let after_products = read_products_from_bytes(new_bytes.clone(), Marking::Bold)?;
+    let new = after_products.iter().find(|p| p.name == product);
+    let ok = new.map_or(false, |n| {
+        n.ingredients.len() == old.ingredients.len() + 1
+            && n.shelf_life_days == old.shelf_life_days
+            && after_products.len() == before.len()
+            && after_products.iter().filter(|p| p.name != product).eq(before.iter().filter(|p| p.name != product))
+    });
+    if !ok {
+        return Err("the change didn't read back correctly, so the spreadsheet was left unchanged".into());
+    }
+    save_with_backup(path, &bytes, &new_bytes)
+}
+
 fn read_products_from_bytes(bytes: Vec<u8>, marking: Marking) -> Result<Vec<Product>, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let sheet_path = first_sheet_path(&mut zip)?;
@@ -923,6 +1152,36 @@ mod write_tests {
         assert!(dir.join("Products (backup).xlsx").exists());
         // Earlier products untouched.
         assert_eq!(ps[0], read_products(&src, Marking::Brackets).unwrap()[0]);
+        println!("{}", p.display());
+    }
+
+    #[test]
+    fn inserts_a_sub_ingredient() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/Products.xlsx");
+        let dir = std::env::temp_dir().join("allergen_insert_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Products.xlsx");
+        std::fs::copy(&src, &p).unwrap();
+        let orig = read_products(&p, Marking::Brackets).unwrap();
+        let brownie = orig.iter().find(|x| x.name == "Chocolate Brownie").unwrap().clone();
+        insert_ingredient(&p, "Chocolate Brownie", Some(1), "Biscoff spread [caramelised biscuits [*wheat* flour, sugar], rapeseed oil, *soya* lecithin]", Some("nuts")).unwrap();
+        let ps = read_products(&p, Marking::Brackets).unwrap();
+        let b = ps.iter().find(|x| x.name == "Chocolate Brownie").unwrap();
+        assert_eq!(b.ingredients.len(), brownie.ingredients.len() + 1);
+        assert_eq!(b.ingredients[0], brownie.ingredients[0]);
+        assert_eq!(b.ingredients[1], brownie.ingredients[1]);
+        let new: String = b.ingredients[2].iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(new, "Biscoff spread (caramelised biscuits (wheat flour, sugar), rapeseed oil, soya lecithin)");
+        assert_eq!(&b.ingredients[3..], &brownie.ingredients[2..]);
+        assert_eq!(b.may_contain.as_deref(), Some("nuts"));
+        assert_eq!(b.shelf_life_days, brownie.shelf_life_days);
+        // Other products untouched; insert at the very start too.
+        assert!(ps.iter().filter(|x| x.name != "Chocolate Brownie").eq(orig.iter().filter(|x| x.name != "Chocolate Brownie")));
+        insert_ingredient(&p, "Flapjack", None, "Golden syrup [sugar syrup]", None).unwrap();
+        let f = read_products(&p, Marking::Brackets).unwrap().into_iter().find(|x| x.name == "Flapjack").unwrap();
+        assert_eq!(f.ingredients[0].iter().map(|r| r.text.as_str()).collect::<String>(), "Golden syrup (sugar syrup)");
+        assert!(insert_ingredient(&p, "Shortbread Fingers", None, "x", None).is_err());
         println!("{}", p.display());
     }
 

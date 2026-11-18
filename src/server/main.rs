@@ -80,6 +80,9 @@ impl AppState {
     fn checked_path(&self) -> PathBuf {
         self.data.join("checked_products.json")
     }
+    fn subs_path(&self) -> PathBuf {
+        self.data.join("sub_ingredients.json")
+    }
 
     /// Re-reads the spreadsheet (and the checked bought-in products).
     fn reload(&self) {
@@ -204,6 +207,8 @@ async fn main() {
         .route("/api/checked", post(api_set_checked))
         .route("/api/add", post(api_add))
         .route("/api/delete", post(api_delete))
+        .route("/api/subs", get(api_subs))
+        .route("/api/sub", post(api_add_sub))
         .route("/api/helper/next", get(api_helper_next))
         .route("/api/helper/result", post(api_helper_result))
         .with_state(state.clone());
@@ -249,6 +254,8 @@ async fn index() -> Response {
 #[derive(Serialize)]
 struct ProductView {
     name: String,
+    /// Ingredients as printed (for choosing where a sub-ingredient goes).
+    ingredients: Vec<String>,
     needs_check: bool,
     barcode: Option<String>,
     store: Option<String>,
@@ -263,6 +270,7 @@ async fn api_state(State(app): State<App>) -> Response {
         .iter()
         .map(|p| ProductView {
             name: p.name.clone(),
+            ingredients: p.ingredients.iter().map(|c| c.iter().map(|r| r.text.as_str()).collect()).collect(),
             needs_check: p.needs_check,
             barcode: p.barcode.clone(),
             store: p.store.clone(),
@@ -285,6 +293,7 @@ async fn api_state(State(app): State<App>) -> Response {
         "margin_mm": g.cfg.margin_mm,
         "title_pt": g.cfg.title_pt,
         "body_pt": g.cfg.body_pt,
+        "text_x_height_mm": g.cfg.text_x_height_mm,
         "font_face": g.cfg.font_face,
         "default_days": g.cfg.best_before_days.clamp(1, 10),
     }))
@@ -419,7 +428,7 @@ async fn api_set_settings(State(app): State<App>, Json(new): Json<Config>) -> Re
     let valid = check(new.label_width_mm, 20.0, 120.0, "Label width")
         .and(check(new.margin_mm, 0.0, 20.0, "Side margin"))
         .and(check(new.title_pt, 6.0, 48.0, "Product name size"))
-        .and(check(new.body_pt, 5.0, 30.0, "Ingredient text size"))
+        .and(check(new.text_x_height_mm, 0.5, 5.0, "Text x-height"))
         .and(check(new.refresh_minutes as f32, 1.0, 1440.0, "Refresh interval"))
         .and(check(new.best_before_days as f32, 1.0, 10.0, "Default best before"));
     if let Err(e) = valid {
@@ -615,4 +624,162 @@ async fn api_add(State(app): State<App>, Json(req): Json<AddReq>) -> Response {
     let a = app.clone();
     let _ = tokio::task::spawn_blocking(move || a.reload()).await;
     Json(json!({ "ok": true, "name": name, "barcode": bc })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Sub-ingredients: a bought-in item (scanned, or chosen from what's already
+// known) added inside one of your own products, e.g. Biscoff spread in a
+// Biscoff brownie. It goes into the product's column in the spreadsheet as
+// "Name [ingredients]" (printed with round brackets) and is kept in a small
+// library so it can be reused.
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SubEntry {
+    name: String,
+    barcode: String,
+    /// *marked* ingredients
+    ingredients: String,
+    may_contain: String,
+    saved_on: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct SubLibrary {
+    items: std::collections::BTreeMap<String, SubEntry>,
+}
+
+fn load_subs(app: &AppState) -> SubLibrary {
+    std::fs::read_to_string(app.subs_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+fn save_subs(app: &AppState, lib: &SubLibrary) -> Result<(), String> {
+    let p = app.subs_path();
+    let tmp = p.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(lib).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &p).map_err(|e| e.to_string())
+}
+
+/// A product's ingredients as *marked* text (allergens in asterisks).
+fn marked_ingredients(p: &Product) -> String {
+    p.ingredients
+        .iter()
+        .map(|cell| cell.iter().map(|r| if r.bold && !r.text.trim().is_empty() { format!("*{}*", r.text) } else { r.text.clone() }).collect::<String>())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .replace("**", "")
+}
+
+#[derive(Serialize)]
+struct SubChoice {
+    name: String,
+    source: &'static str, // library | product
+    barcode: Option<String>,
+    ingredients: String,
+    may_contain: String,
+}
+
+async fn api_subs(State(app): State<App>) -> Response {
+    let lib = load_subs(&app);
+    let g = app.inner.lock().unwrap();
+    let mut out: Vec<SubChoice> = lib
+        .items
+        .values()
+        .map(|e| SubChoice {
+            name: e.name.clone(),
+            source: "library",
+            barcode: Some(e.barcode.clone()).filter(|b| !b.is_empty()),
+            ingredients: e.ingredients.clone(),
+            may_contain: e.may_contain.clone(),
+        })
+        .collect();
+    for p in g.products.iter().filter(|p| !p.needs_check && !p.ingredients.is_empty()) {
+        if out.iter().any(|c| c.name.eq_ignore_ascii_case(&p.name)) {
+            continue;
+        }
+        out.push(SubChoice {
+            name: p.name.clone(),
+            source: "product",
+            barcode: p.barcode.clone(),
+            ingredients: marked_ingredients(p),
+            may_contain: p.may_contain.clone().unwrap_or_default(),
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Json(out).into_response()
+}
+
+#[derive(Deserialize)]
+struct SubReq {
+    /// The product it goes into.
+    product: String,
+    /// Index of the ingredient it follows; None = at the start.
+    after: Option<usize>,
+    name: String,
+    ingredients: String,
+    #[serde(default)]
+    may_contain: String,
+    #[serde(default)]
+    barcode: String,
+}
+
+async fn api_add_sub(State(app): State<App>, Json(req): Json<SubReq>) -> Response {
+    let name = req.name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "Enter the sub-ingredient's name, e.g. Biscoff spread.");
+    }
+    if name.contains(['[', ']', '*']) {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "The name can't contain [ ] or *.");
+    }
+    let ing = match lookup::normalise_ingredients(&req.ingredients) {
+        Ok(i) => i,
+        Err(e) => return err(StatusCode::UNPROCESSABLE_ENTITY, e),
+    };
+    if ing.matches('[').count() != ing.matches(']').count() || ing.matches('(').count() != ing.matches(')').count() {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "The brackets in the ingredients don't match up – check each ( has a ) and each [ has a ].");
+    }
+    let may = req.may_contain.trim().trim_end_matches('.').to_string();
+    // Inside the sub-ingredient list, round brackets would make text bold in
+    // bracket mode, so turn them into square ones; allergens are the *starred* words.
+    let marking = app.inner.lock().unwrap().cfg.marking();
+    let inner = if marking == xlsx::Marking::Brackets { ing.replace('(', "[").replace(')', "]") } else { ing.clone() };
+    let text = format!("{name} [{inner}]");
+    {
+        let g = app.inner.lock().unwrap();
+        match g.products.iter().find(|p| p.name == req.product) {
+            None => return err(StatusCode::NOT_FOUND, "That product isn't in the spreadsheet any more – refresh and try again."),
+            Some(p) if p.barcode.is_some() => {
+                return err(StatusCode::UNPROCESSABLE_ENTITY, "Sub-ingredients go into products you make; this one is bought in.")
+            }
+            _ => {}
+        }
+    }
+    let path = app.spreadsheet();
+    let (product, after, t2, m2) = (req.product.clone(), req.after, text.clone(), may.clone());
+    let res = tokio::task::spawn_blocking(move || {
+        xlsx::insert_ingredient(&path, &product, after, &t2, Some(m2.as_str()).filter(|m| !m.is_empty()))
+    })
+    .await
+    .unwrap_or_else(|_| Err("failed".into()));
+    if let Err(e) = res {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("Couldn't add it to the spreadsheet: {e}"));
+    }
+    // Keep it for next time.
+    let mut lib = load_subs(&app);
+    let t = today();
+    lib.items.insert(
+        name.to_lowercase(),
+        SubEntry {
+            name: name.clone(),
+            barcode: xlsx::parse_barcode(&req.barcode).unwrap_or_default(),
+            ingredients: ing,
+            may_contain: may,
+            saved_on: allergen_labels::date::add_days_formatted(t.0, t.1, t.2, 0),
+        },
+    );
+    let _ = save_subs(&app, &lib);
+    let a = app.clone();
+    let _ = tokio::task::spawn_blocking(move || a.reload()).await;
+    Json(json!({ "ok": true, "text": text })).into_response()
 }

@@ -71,11 +71,18 @@ impl Fonts {
     pub fn new(hdc: HDC, cfg: &Config, dpi: f32) -> Fonts {
         let px = |pt: f32| (pt * dpi / 72.0).round() as i32;
         let face = if cfg.font_face.trim().is_empty() { "Arial" } else { cfg.font_face.trim() };
+        // Everything except the product name is sized so a printed lower-case x is
+        // exactly text_x_height_mm tall, measured on this font at this resolution.
+        let x_mm = if cfg.text_x_height_mm > 0.0 { cfg.text_x_height_mm } else { 1.0 };
+        let target_x = x_mm * dpi / 25.4;
+        let sized = |bold: bool, italic: bool| -> i32 { size_for_x_height(hdc, face, bold, italic, target_x) };
+        // The product name keeps its point size, but is never smaller than the text.
+        let title_px = px(cfg.title_pt).max(sized(true, false));
         let h = [
-            make_font(face, px(cfg.title_pt), true, false),
-            make_font(face, px(cfg.body_pt), false, false),
-            make_font(face, px(cfg.body_pt), true, false),
-            make_font(face, px(cfg.body_pt * 0.85), false, true),
+            make_font(face, title_px, true, false),
+            make_font(face, sized(false, false), false, false),
+            make_font(face, sized(true, false), true, false),
+            make_font(face, sized(false, true), false, true),
         ];
         let mut ascent = [0; 4];
         let mut height = [0; 4];
@@ -92,6 +99,38 @@ impl Fonts {
         }
         Fonts { h, ascent, height }
     }
+}
+
+/// Height of the lower-case "x" glyph (its black box) in device units.
+fn x_height(hdc: HDC, font: HFONT) -> Option<f32> {
+    unsafe {
+        let old = SelectObject(hdc, font as _);
+        let mut gm: GLYPHMETRICS = std::mem::zeroed();
+        let identity = MAT2 {
+            eM11: FIXED { fract: 0, value: 1 },
+            eM12: FIXED { fract: 0, value: 0 },
+            eM21: FIXED { fract: 0, value: 0 },
+            eM22: FIXED { fract: 0, value: 1 },
+        };
+        let r = GetGlyphOutlineW(hdc, 'x' as u32, GGO_METRICS, &mut gm, 0, null_mut(), &identity);
+        SelectObject(hdc, old);
+        (r != u32::MAX && gm.gmBlackBoxY > 0).then_some(gm.gmBlackBoxY as f32)
+    }
+}
+
+/// Font height (device units) whose lower-case x is `target_x` device units tall.
+fn size_for_x_height(hdc: HDC, face: &str, bold: bool, italic: bool, target_x: f32) -> i32 {
+    // Measure at a large reference size for accuracy, then scale.
+    const REF: i32 = 400;
+    let f = make_font(face, REF, bold, italic);
+    let measured = x_height(hdc, f);
+    unsafe { DeleteObject(f as _) };
+    match measured {
+        Some(xh) => ((REF as f32) * target_x / xh).ceil() as i32,
+        // Fallback: typical x-height is about 0.52 of the font height.
+        None => (target_x / 0.52).ceil() as i32,
+    }
+    .max(1)
 }
 
 impl Drop for Fonts {

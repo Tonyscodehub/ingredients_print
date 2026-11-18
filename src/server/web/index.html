@@ -17,6 +17,7 @@
       --btn: #2d2d2a; --btn-hover: #3a332e; --shadow: none; }
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; }
   body { background: var(--bg); color: var(--text); font: 15px/1.4 "Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif;
     display: flex; flex-direction: column; overflow: hidden; }
@@ -54,6 +55,16 @@
   #grid.compact .product .del { top: 2px; right: 2px; width: 20px; height: 20px; }
   #grid.compact .product .del svg { width: 13px; height: 13px; }
   .tool.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .product .addsub { position: absolute; top: 4px; left: 4px; width: 26px; height: 26px; border-radius: 6px; display: flex;
+    align-items: center; justify-content: center; color: var(--muted); opacity: .55; font-weight: 600; font-size: 20px; line-height: 1; }
+  .product .addsub:hover { opacity: 1; color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
+  #grid.compact .product .addsub { top: 2px; left: 2px; width: 20px; height: 20px; font-size: 16px; }
+  .seg { display: flex; gap: 0; }
+  .seg button { border-radius: 0; }
+  .seg button:first-child { border-radius: 8px 0 0 8px; }
+  .seg button:last-child { border-radius: 0 8px 8px 0; margin-left: -1px; }
+  .seg button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  #sub-preview { font-size: 14.5px; padding: 8px 10px; border: 1px dashed var(--line); border-radius: 8px; min-height: 2.4em; }
   #empty { padding: 40px 24px; text-align: center; color: var(--muted); }
   aside { width: 340px; flex: none; border-left: 1px solid var(--line); padding: 10px 16px; overflow-y: auto; background: var(--bg); }
   aside h2 { font-size: 13px; font-weight: 500; color: var(--muted); margin: 0 0 8px; }
@@ -67,7 +78,9 @@
   #preview-hint { color: var(--muted); text-align: center; margin-top: 16px; font-size: 13.5px; }
   dialog { border: 1px solid var(--line); border-radius: 12px; padding: 0; background: var(--panel); color: var(--text); width: min(680px, 94vw); max-height: 92vh; }
   dialog::backdrop { background: rgba(0,0,0,.35); }
-  dialog form { padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+  dialog { overflow: hidden; }
+  dialog form { padding: 18px 20px 0; display: flex; flex-direction: column; gap: 12px; max-height: calc(92vh - 2px); overflow-y: auto; }
+  dialog .actions { position: sticky; bottom: 0; background: var(--panel); padding: 10px 0 16px; margin-top: 0; border-top: 1px solid var(--line); }
   dialog h3 { margin: 0; font-size: 18px; }
   .row { display: grid; grid-template-columns: 210px 1fr; gap: 10px; align-items: center; }
   @media (max-width: 560px) { .row { grid-template-columns: 1fr; gap: 4px; } }
@@ -96,6 +109,7 @@
   <h1>Allergen labels</h1>
   <button class="tool" id="btn-refresh" title="Re-read the spreadsheet now">Refresh</button>
   <button class="tool" id="btn-add">Add bought-in product…</button>
+  <button class="tool" id="btn-sub">Add sub-ingredient…</button>
   <button class="tool" id="btn-settings">Settings…</button>
   <label class="copies">Copies <select id="copies"></select></label>
   <span id="status">Loading…</span>
@@ -150,6 +164,32 @@
   </form>
 </dialog>
 
+<dialog id="dlg-sub">
+  <form method="dialog">
+    <h3>Add sub-ingredient</h3>
+    <div class="row"><label for="sub-product">Add it to</label><select id="sub-product"></select></div>
+    <div class="row"><label>Sub-ingredient</label>
+      <div class="seg"><button type="button" class="tool on" id="sub-mode-scan">Scan or type a barcode</button><button type="button" class="tool" id="sub-mode-pick">Choose one already saved</button></div></div>
+    <div class="row" id="sub-scan-row"><label for="sub-bc">Barcode</label>
+      <div class="inline"><input type="text" id="sub-bc" inputmode="numeric" autocomplete="off"><button type="button" class="tool" id="sub-lookup">Look up</button></div></div>
+    <div class="row" id="sub-pick-row" hidden><label for="sub-pick">Saved sub-ingredients and products</label><select id="sub-pick"></select></div>
+    <p class="msg" id="sub-msg"></p>
+    <div class="row"><label for="sub-name">Name on the label</label><input type="text" id="sub-name" autocomplete="off" placeholder="e.g. Biscoff spread"></div>
+    <div class="field">
+      <label for="sub-ing">Its ingredients – put *asterisks* around each allergen, matching the bold words on the pack</label>
+      <textarea id="sub-ing" spellcheck="false" style="min-height:110px"></textarea>
+    </div>
+    <div class="row"><label for="sub-may">May contain (from its pack, if any)</label><input type="text" id="sub-may" autocomplete="off"></div>
+    <div class="row"><label for="sub-after">Put it after</label><select id="sub-after"></select></div>
+    <div class="field"><label>How it will read on the label</label><div id="sub-preview"></div></div>
+    <p class="warnbox">Check its ingredients against the pack before adding. It's saved so you can choose it again next time.</p>
+    <div class="actions">
+      <button type="button" class="tool primary" id="sub-go">Add</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="dlg-delete">
   <form method="dialog">
     <h3 id="del-title">Delete product?</h3>
@@ -178,7 +218,7 @@
         <select id="s-one_per_line"><option value="false">Comma-separated, like a UK food label</option><option value="true">One ingredient per line</option></select></div>
       <div class="field"><label for="s-refresh_minutes">Re-read the spreadsheet every (minutes)</label><input type="number" id="s-refresh_minutes" min="1" max="1440"></div>
       <div class="field"><label for="s-title_pt">Product name size (pt)</label><input type="number" id="s-title_pt" min="6" max="48" step="0.5"></div>
-      <div class="field"><label for="s-body_pt">Ingredient text size (pt)</label><input type="number" id="s-body_pt" min="5" max="30" step="0.5"></div>
+      <div class="field"><label for="s-text_x_height_mm">Text size: printed height of a lower-case x (mm)</label><input type="number" id="s-text_x_height_mm" min="0.5" max="5" step="0.1"></div>
       <div class="field"><label for="s-font_face">Font</label><input type="text" id="s-font_face"></div>
       <div class="field"><label for="s-label_width_mm">Label width (mm)</label><input type="number" id="s-label_width_mm" min="20" max="120" step="0.5"></div>
       <div class="field"><label for="s-margin_mm">Extra side margin (mm)</label><input type="number" id="s-margin_mm" min="0" max="20" step="0.5"></div>
@@ -318,6 +358,17 @@ function renderButtons() {
     del.addEventListener("click", (e) => { e.stopPropagation(); openDelete(p.name); });
     del.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
     b.appendChild(del);
+    if (!p.barcode) {
+      const add = document.createElement("span");
+      add.className = "addsub";
+      add.setAttribute("role", "button");
+      add.setAttribute("aria-label", "Add a sub-ingredient to " + p.name);
+      add.title = "Add a sub-ingredient to " + p.name;
+      add.textContent = "+";
+      add.addEventListener("click", (e) => { e.stopPropagation(); openSub(p.name); });
+      add.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+      b.appendChild(add);
+    }
     b.addEventListener("click", () => onProduct(p.name, b));
     if (p.barcode) {
       // Right-click or long-press a bought-in product to re-check it.
@@ -364,26 +415,41 @@ function renderPreview() {
   const width = box.clientWidth || 300;
   const dpi = width / (Math.max(20, state.label_width_mm) / 25.4);
   const pt = (v) => (v * dpi) / 72 + "px";
+  // Text is sized so a lower-case x is text_x_height_mm tall, as when printed.
+  const textPx = (state.text_x_height_mm * dpi / 25.4) / xRatio(state.font_face);
+  const titlePx = Math.max((state.title_pt * dpi) / 72, textPx);
   const label = document.createElement("div");
   label.className = "label";
   label.style.padding = (Math.max(0, state.margin_mm) * dpi) / 25.4 + 4 + "px";
   label.style.fontFamily = `"${state.font_face}", Arial, sans-serif`;
-  const bodyLine = (state.body_pt * dpi) / 72 * 1.15;
+  const bodyLine = textPx * 1.15;
   for (const para of p.label) {
     const el = document.createElement("p");
     if (para.center) el.className = "c";
     el.style.lineHeight = "1.15";
+    el.style.fontSize = (para.base === "title" ? titlePx : textPx) + "px";
     el.style.marginBottom = para.gap_after * bodyLine + "px";
     for (const r of para.runs) {
       const s = document.createElement("span");
       s.textContent = r.text;
       s.className = r.style;
-      s.style.fontSize = pt(r.style === "title" ? state.title_pt : r.style === "footer" ? state.body_pt * 0.85 : state.body_pt);
+      s.style.fontSize = (r.style === "title" ? titlePx : textPx) + "px";
       el.appendChild(s);
     }
     label.appendChild(el);
   }
   box.appendChild(label);
+}
+
+// Height of a lower-case x as a fraction of the font size, measured in the browser.
+const xRatioCache = {};
+function xRatio(face) {
+  if (xRatioCache[face]) return xRatioCache[face];
+  const c = document.createElement("canvas").getContext("2d");
+  c.font = `100px "${face}", Arial, sans-serif`;
+  const m = c.measureText("x");
+  const r = (m.actualBoundingBoxAscent + m.actualBoundingBoxDescent) / 100 || 0.52;
+  return (xRatioCache[face] = r);
 }
 
 // ---- Printing ------------------------------------------------------------
@@ -514,6 +580,134 @@ $("add-go").addEventListener("click", async () => {
   } catch (e) { $("add-msg").textContent = e.message; }
 });
 
+// Add a sub-ingredient
+let subChoices = [], subBarcode = "";
+function homemade() { return state.products.filter((p) => !p.barcode); }
+function fillAfter() {
+  const p = state.products.find((x) => x.name === $("sub-product").value);
+  const sel = $("sub-after");
+  sel.innerHTML = "";
+  const first = document.createElement("option");
+  first.value = ""; first.textContent = "At the start";
+  sel.appendChild(first);
+  (p ? p.ingredients : []).forEach((ing, i) => {
+    const o = document.createElement("option");
+    o.value = i; o.textContent = ing;
+    sel.appendChild(o);
+  });
+  sel.value = p && p.ingredients.length ? String(p.ingredients.length - 1) : "";
+  fillPick();
+  subPreview();
+}
+function fillPick() {
+  const sel = $("sub-pick");
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = ""; none.textContent = subChoices.length ? "Choose…" : "Nothing saved yet – scan one instead";
+  sel.appendChild(none);
+  subChoices.filter((c) => c.name !== $("sub-product").value).forEach((c, i) => {
+    const o = document.createElement("option");
+    o.value = c.name; o.textContent = c.name + (c.source === "library" ? "" : "  (product)");
+    sel.appendChild(o);
+  });
+}
+function setSubMode(scan) {
+  $("sub-mode-scan").classList.toggle("on", scan);
+  $("sub-mode-pick").classList.toggle("on", !scan);
+  $("sub-scan-row").hidden = !scan;
+  $("sub-pick-row").hidden = scan;
+  $("sub-msg").textContent = scan ? "Scan the item's barcode (or type it) – Enter looks it up." : "";
+  (scan ? $("sub-bc") : $("sub-pick")).focus();
+}
+function subPreview() {
+  const box = $("sub-preview");
+  box.innerHTML = "";
+  const name = $("sub-name").value.trim();
+  const ing = $("sub-ing").value.replace(/\s*\n\s*/g, ", ").trim().replace(/\.$/, "");
+  if (!name && !ing) { box.textContent = "—"; return; }
+  box.appendChild(document.createTextNode(name + " ("));
+  ing.split("*").forEach((part, i) => {
+    if (!part) return;
+    if (i % 2) { const b = document.createElement("b"); b.textContent = part; box.appendChild(b); }
+    else box.appendChild(document.createTextNode(part.replace(/\[/g, "(").replace(/\]/g, ")")));
+  });
+  box.appendChild(document.createTextNode(")"));
+  const may = $("sub-may").value.trim();
+  if (may) { const m = document.createElement("div"); m.className = "note"; m.textContent = "Adds “May contain: " + may + "” to the label."; box.appendChild(m); }
+}
+async function openSub(productName) {
+  const list = homemade();
+  if (!list.length) { toast("Add one of your own products first.", true); return; }
+  const sel = $("sub-product");
+  sel.innerHTML = "";
+  list.forEach((p) => { const o = document.createElement("option"); o.value = p.name; o.textContent = p.name; sel.appendChild(o); });
+  sel.value = productName && list.some((p) => p.name === productName) ? productName : (previewName && list.some((p) => p.name === previewName) ? previewName : list[0].name);
+  ["sub-bc", "sub-name", "sub-ing", "sub-may"].forEach((id) => ($(id).value = ""));
+  subBarcode = "";
+  try { subChoices = await api("/api/subs"); } catch (e) { subChoices = []; }
+  fillAfter();
+  $("dlg-sub").showModal();
+  setSubMode(true);
+}
+$("btn-sub").addEventListener("click", () => openSub(null));
+$("sub-product").addEventListener("change", fillAfter);
+$("sub-mode-scan").addEventListener("click", () => setSubMode(true));
+$("sub-mode-pick").addEventListener("click", () => setSubMode(false));
+["sub-name", "sub-ing", "sub-may"].forEach((id) => $(id).addEventListener("input", subPreview));
+$("sub-pick").addEventListener("change", () => {
+  const c = subChoices.find((x) => x.name === $("sub-pick").value);
+  if (!c) return;
+  $("sub-name").value = c.name; $("sub-ing").value = c.ingredients; $("sub-may").value = c.may_contain || "";
+  subBarcode = c.barcode || "";
+  $("sub-msg").textContent = c.source === "library" ? "Saved sub-ingredient – check it still matches the pack." : "Uses that product's ingredients.";
+  subPreview();
+});
+async function subLookup() {
+  const bc = $("sub-bc").value.trim();
+  if (!bc) return;
+  $("sub-msg").textContent = "Looking up this barcode on Open Food Facts…";
+  // Already saved? Use that first.
+  const saved = subChoices.find((c) => c.barcode && c.barcode === bc.replace(/\D/g, ""));
+  if (saved) {
+    $("sub-name").value = saved.name; $("sub-ing").value = saved.ingredients; $("sub-may").value = saved.may_contain || "";
+    subBarcode = saved.barcode;
+    $("sub-msg").textContent = "Already saved as " + saved.name + " – check it still matches the pack.";
+    subPreview(); $("sub-after").focus(); return;
+  }
+  try {
+    const r = await api("/api/lookup", { barcode: bc });
+    subBarcode = r.barcode || bc;
+    if (r.found) {
+      if (!$("sub-name").value.trim()) $("sub-name").value = r.found.name || "";
+      $("sub-ing").value = r.found.ingredients || "";
+      $("sub-may").value = r.found.may_contain || "";
+      $("sub-msg").textContent = `Found: ${r.found.name || "(no name)"}${r.found.brand ? " (" + r.found.brand + ")" : ""}. Check it against the pack, and shorten the name if you like.` + (r.found.ingredients ? "" : " No ingredients listed – type them from the pack.");
+    } else if (r.error) {
+      $("sub-msg").textContent = `Couldn't look it up (${r.error}). Type the name and ingredients from the pack.`;
+    } else {
+      $("sub-msg").textContent = "Not found on Open Food Facts. Type the name and ingredients from the pack.";
+    }
+  } catch (e) { $("sub-msg").textContent = e.message; }
+  subPreview();
+  $("sub-name").focus();
+}
+$("sub-lookup").addEventListener("click", subLookup);
+$("sub-bc").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); subLookup(); } });
+$("sub-go").addEventListener("click", async () => {
+  const after = $("sub-after").value;
+  try {
+    await api("/api/sub", {
+      product: $("sub-product").value, after: after === "" ? null : Number(after),
+      name: $("sub-name").value, ingredients: $("sub-ing").value, may_contain: $("sub-may").value, barcode: subBarcode,
+    });
+    $("dlg-sub").close();
+    toast(`${$("sub-name").value.trim()} added to ${$("sub-product").value}.`);
+    previewName = $("sub-product").value;
+    signature = "";
+    await loadState();
+  } catch (e) { $("sub-msg").textContent = e.message; }
+});
+
 // Delete a product
 let deleteName = null;
 function openDelete(name) {
@@ -536,7 +730,7 @@ $("del-go").addEventListener("click", async () => {
 
 // Settings
 const settingFields = ["business_name", "contact", "address", "footer", "warning", "best_before_days", "allergens_in_brackets", "one_per_line",
-  "refresh_minutes", "title_pt", "body_pt", "font_face", "label_width_mm", "margin_mm"];
+  "refresh_minutes", "title_pt", "text_x_height_mm", "font_face", "label_width_mm", "margin_mm"];
 let settingsCache = null;
 $("btn-settings").addEventListener("click", async () => {
   try { settingsCache = await api("/api/settings"); } catch (e) { toast(e.message, true); return; }

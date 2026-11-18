@@ -16,7 +16,11 @@ pub struct Config {
     pub margin_mm: f32,
     pub font_face: String,
     pub title_pt: f32,
+    /// Old setting, no longer used for printing (text is sized by x-height now).
     pub body_pt: f32,
+    /// Printed height of a lower-case "x" in the ingredient and other text, in mm.
+    /// UK rules: at least 1.2 mm, or 0.9 mm if the pack's largest surface is under 80 cm².
+    pub text_x_height_mm: f32,
     /// false = "Ingredients: a, b, c." (UK label style); true = one per line.
     pub one_per_line: bool,
     /// Printed under the ingredients; leave empty for none.
@@ -54,6 +58,7 @@ impl Default for Config {
             font_face: "Arial".into(),
             title_pt: 16.0,
             body_pt: 10.0,
+            text_x_height_mm: 1.0,
             one_per_line: false,
             footer: "Allergens are shown in bold.".into(),
             business_name: "PoFfles".into(),

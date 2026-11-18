@@ -988,8 +988,8 @@ fn open_settings() {
 
         label("Product name size (pt):", lx, y, lw);
         place(S_TITLE, "EDIT", &fmt_num(cfg.title_pt), edit, WS_EX_CLIENTEDGE, cx, y, s(70), rh);
-        label("Ingredient text size (pt):", cx + s(90), y, s(180));
-        place(S_BODY, "EDIT", &fmt_num(cfg.body_pt), edit, WS_EX_CLIENTEDGE, cx + s(280), y, s(70), rh);
+        label("Text: height of an x (mm):", cx + s(90), y, s(180));
+        place(S_BODY, "EDIT", &format!("{:.1}", cfg.text_x_height_mm), edit, WS_EX_CLIENTEDGE, cx + s(280), y, s(70), rh);
         y += step;
 
         label("Ingredient layout:", lx, y, lw);
@@ -1209,7 +1209,7 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
         cfg.font_face = "Arial".into();
     }
     cfg.title_pt = num(S_TITLE, "Product name size", 6.0, 48.0)?;
-    cfg.body_pt = num(S_BODY, "Ingredient text size", 5.0, 30.0)?;
+    cfg.text_x_height_mm = num(S_BODY, "Text x-height", 0.5, 5.0)?;
     cfg.one_per_line = unsafe { SendMessageW(item(S_LAYOUT), CB_GETCURSEL, 0, 0) } == 1;
     cfg.refresh_minutes = num(S_REFRESH, "Refresh interval", 1.0, 1440.0)? as u32;
     cfg.footer = get_text(item(S_FOOTER)).trim().to_string();

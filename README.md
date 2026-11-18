@@ -39,6 +39,22 @@ From top to bottom: the product name, "Ingredients:" with the bracketed allergen
 
 The default warning reads: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination." The Food Standards Agency recommends that "may contain" style warnings name the specific allergens at risk (e.g. "may contain tree nuts") and are based on a risk assessment, so adjust it in Settings to suit the kitchen.
 
+## Sub-ingredients (e.g. Biscoff spread in a Biscoff brownie)
+
+In the web app, press **+** at the top left of one of your own products (or **Add sub-ingredient…** at the top):
+
+1. **Scan or type the barcode** of the item (e.g. the jar of Biscoff spread) and it's looked up, or **choose one already saved** – sub-ingredients you've added before, or any of your products.
+2. Check the name and its ingredients against the pack. Put \*asterisks\* around allergens, and fill in its "may contain" warning if it has one.
+3. Choose which ingredient it goes after, check how it will read, and press **Add**.
+
+It's added to that product's column in the spreadsheet as `Biscoff spread [caramelised biscuits (*wheat* flour, …), …]` and saved for next time. On the label it reads "Biscoff spread (caramelised biscuits (**wheat** flour, …), …)".
+
+You can type these into the spreadsheet yourself too:
+
+- **[Square brackets]** hold a sub-ingredient's own list. They print as round brackets and don't make their contents bold.
+- **\*Asterisks\*** mark an allergen in any cell, whichever way allergens are marked in Settings. The asterisks aren't printed.
+- A cell starting **May contain:** (e.g. `May contain: nuts`) adds to the product's "May contain" line rather than being an ingredient.
+
 ## Bought-in products (barcode lookup)
 
 For things you buy in and resell, the column only needs the product name, an optional shelf life, the barcode, and the shop:
@@ -68,7 +84,7 @@ Online information can be wrong, incomplete, or out of date, and the pack is the
 | Printer | Which printer to use, or the Windows default |
 | Label width (mm) | Used for the on-screen preview (72 mm suits 80 mm paper) |
 | Extra side margin (mm) | Added inside the printer's own margins |
-| Font, sizes | Product name and ingredient text sizes in points |
+| Font, sizes | Product name size in points; all other text is sized by the printed height of a lower-case x (1 mm by default). UK rules ask for at least 1.2 mm, or 0.9 mm if the pack's largest surface is under 80 cm². |
 | Allergens are | Text in (brackets) (default), or bold text in the spreadsheet |
 | Ingredient layout | "Ingredients: a, **b**, c." like a UK food label, or one per line |
 | Footer text | Optional line under the ingredients, e.g. "Allergens are shown in bold." Leave blank for none |
