@@ -1291,6 +1291,27 @@ pub fn rewrite_product_column(path: &Path, original: &str, new: &RawProduct, mar
     save_with_backup(path, &l.bytes, &new_bytes)
 }
 
+/// A short fingerprint of a file's contents, used to spot changes.
+pub fn version_of(bytes: &[u8]) -> String {
+    // FNV-1a, 64-bit
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}-{}", bytes.len())
+}
+
+/// Replaces the spreadsheet with an uploaded copy, after checking it can be
+/// read. The previous version is kept as a backup. Returns the product count.
+pub fn replace_spreadsheet(path: &Path, new_bytes: &[u8]) -> Result<usize, String> {
+    let products = read_products_from_bytes(new_bytes.to_vec(), Marking::Bold)
+        .map_err(|e| format!("the uploaded file couldn't be read as a spreadsheet ({e}). Save it as an Excel workbook (.xlsx)"))?;
+    let old = std::fs::read(path).unwrap_or_default();
+    save_with_backup(path, &old, new_bytes)?;
+    Ok(products.len())
+}
+
 fn read_products_from_bytes(bytes: Vec<u8>, marking: Marking) -> Result<Vec<Product>, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let sheet_path = first_sheet_path(&mut zip)?;

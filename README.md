@@ -143,8 +143,19 @@ docker compose up -d --build
 It runs at **https://192.168.1.128:8443**. Blockplan already uses port 443, so this uses 8443; change it with `LABELS_PORT` in `.env`.
 
 - **The spreadsheet** lives in the `data` folder next to `docker-compose.yml`, as `Products.xlsx`. The first time, the sample spreadsheet is put there. Copy your own over it. Settings and checked bought-in products are kept in the same folder.
-- **To edit the spreadsheet in Excel,** the `data` folder needs to be reachable from Windows. Share it (e.g. with Samba), or keep the spreadsheet on the NAS and mount that share into the container in `docker-compose.yml` in place of `./data`. Saved changes are picked up within a minute. Close Excel before adding a bought-in product from the web app, or Excel's next save will overwrite the new column.
+- **To edit the spreadsheet in Excel,** press **Edit spreadsheet…** in the Windows app (see below). You can also download it from the link in the web app's Settings and upload it with `curl`, but the Windows app does it for you.
 - The web app needs internet access for barcode lookups.
+
+### One spreadsheet for both
+
+When the Windows app has a web app address in Settings, it uses the web app's spreadsheet, not one on the PC. Both always show the same products, and labels printed from either use the web app's label settings (the PC only chooses the printer).
+
+- The product list is fetched every minute, and when you press **Refresh products**. A copy is kept on the PC, so the buttons still work if the web app can't be reached.
+- **Add bought-in product…** and the checking screen save to the web app.
+- **Edit spreadsheet…** downloads the web app's spreadsheet and opens it in Excel (or whatever opens .xlsx files on that PC). Each time you save, the changes are sent straight back to the web app, and the old version is kept as `Products (backup).xlsx` in the `data` folder. Keep editing and saving as often as you like.
+- If someone adds, edits, or checks a product on the web app while the file is open in Excel, saving asks before overwriting: **Yes** keeps your version, **No** keeps the web app's. Then close the file and press **Edit spreadsheet…** again for a fresh copy.
+- A file that can't be read as a spreadsheet is refused, and the web app keeps its current one.
+- The spreadsheet setting in the Windows app is then greyed out. It's only used when no web app address is set.
 
 ### 2. HTTPS
 

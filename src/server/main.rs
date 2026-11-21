@@ -208,6 +208,8 @@ async fn main() {
         .route("/api/add", post(api_add))
         .route("/api/delete", post(api_delete))
         .route("/api/subs", get(api_subs))
+        .route("/api/products", get(api_products))
+        .route("/api/spreadsheet", get(api_download_sheet).post(api_upload_sheet).layer(axum::extract::DefaultBodyLimit::max(50 * 1024 * 1024)))
         .route("/api/product", get(api_get_product))
         .route("/api/product/save", post(api_save_product))
         .route("/api/product/duplicate", post(api_duplicate_product))
@@ -922,4 +924,70 @@ async fn api_duplicate_product(State(app): State<App>, Json(mut req): Json<Dupli
     let a = app.clone();
     let _ = tokio::task::spawn_blocking(move || a.reload()).await;
     Json(json!({ "ok": true, "name": req.product.name })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// The spreadsheet itself: the Windows app shows these products, and its
+// "Edit spreadsheet" button downloads the file, opens it in Excel, and
+// uploads it again each time it's saved.
+
+async fn api_products(State(app): State<App>) -> Response {
+    let version = std::fs::read(app.spreadsheet()).map(|b| xlsx::version_of(&b)).unwrap_or_default();
+    let g = app.inner.lock().unwrap();
+    Json(json!({
+        "products": g.products,
+        "cfg": g.cfg,
+        "version": version,
+        "file": app.spreadsheet().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default(),
+        "error": g.error,
+    }))
+    .into_response()
+}
+
+async fn api_download_sheet(State(app): State<App>) -> Response {
+    match std::fs::read(app.spreadsheet()) {
+        Ok(bytes) => {
+            let version = xlsx::version_of(&bytes);
+            (
+                [
+                    (header::CONTENT_TYPE, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()),
+                    (header::CONTENT_DISPOSITION, "attachment; filename=\"Products.xlsx\"".to_string()),
+                    (header::CACHE_CONTROL, "no-store".to_string()),
+                    (header::HeaderName::from_static("x-version"), version),
+                ],
+                bytes,
+            )
+                .into_response()
+        }
+        Err(e) => err(StatusCode::NOT_FOUND, format!("Couldn't read the spreadsheet: {e}")),
+    }
+}
+
+async fn api_upload_sheet(State(app): State<App>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
+    let path = app.spreadsheet();
+    let current = std::fs::read(&path).map(|b| xlsx::version_of(&b)).unwrap_or_default();
+    let base = headers.get("x-base-version").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let force = headers.get("x-force").and_then(|v| v.to_str().ok()) == Some("1");
+    if xlsx::version_of(&body) == current {
+        return Json(json!({ "ok": true, "version": current, "unchanged": true })).into_response();
+    }
+    if !force && base != current {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "The web app's spreadsheet has changed since you opened it.", "version": current })),
+        )
+            .into_response();
+    }
+    let bytes = body.to_vec();
+    let p2 = path.clone();
+    let res = tokio::task::spawn_blocking(move || xlsx::replace_spreadsheet(&p2, &bytes)).await.unwrap_or_else(|_| Err("failed".into()));
+    match res {
+        Ok(n) => {
+            let a = app.clone();
+            let _ = tokio::task::spawn_blocking(move || a.reload()).await;
+            let version = std::fs::read(&path).map(|b| xlsx::version_of(&b)).unwrap_or_default();
+            Json(json!({ "ok": true, "version": version, "count": n })).into_response()
+        }
+        Err(e) => err(StatusCode::UNPROCESSABLE_ENTITY, e),
+    }
 }

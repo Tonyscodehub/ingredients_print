@@ -8,6 +8,8 @@ mod http;
 #[cfg(windows)]
 mod label;
 #[cfg(windows)]
+mod remote;
+#[cfg(windows)]
 mod ui;
 
 #[cfg(windows)]

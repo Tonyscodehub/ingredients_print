@@ -3,6 +3,7 @@
 use crate::config::Config;
 use crate::label::{self, wide};
 use crate::lookup::{self, Found};
+use crate::remote::{Server, Upload};
 use crate::xlsx::{self, Product, Run};
 use std::cell::RefCell;
 use std::path::Path;
@@ -16,7 +17,7 @@ use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::Controls::SetScrollInfo;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus};
-use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass, Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY};
+use windows_sys::Win32::UI::Shell::{ShellExecuteW, DefSubclassProc, SetWindowSubclass, Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const APP_TITLE: &str = "Allergen Label Printer";
@@ -25,6 +26,7 @@ const ID_REFRESH: usize = 101;
 const ID_SETTINGS: usize = 102;
 const ID_COPIES: usize = 103;
 const ID_ADD: usize = 104;
+const ID_EDIT: usize = 105;
 const ID_PRODUCT: usize = 1000;
 
 const S_PATH: i32 = 2001;
@@ -52,11 +54,15 @@ const S_TRAY: i32 = 2022;
 const S_AUTOSTART: i32 = 2023;
 
 const TIMER_POLL: usize = 1;
+const TIMER_EDIT: usize = 2;
 const WM_APP_STATUS: u32 = WM_APP + 1;
 const WM_APP_LOOKUP: u32 = WM_APP + 2;
 const WM_APP_RECHECK: u32 = WM_APP + 3;
 const WM_APP_TITLE: u32 = WM_APP + 4;
 const WM_APP_TRAY: u32 = WM_APP + 5;
+const WM_APP_PRODUCTS: u32 = WM_APP + 6;
+const WM_APP_UPLOADED: u32 = WM_APP + 7;
+const WM_APP_EDITREADY: u32 = WM_APP + 8;
 const ID_TRAY_OPEN: usize = 9001;
 const ID_TRAY_EXIT: usize = 9002;
 
@@ -115,6 +121,26 @@ struct App {
     add_barcode: String,
     /// Latest lookup result from the Add window, reused by the checking screen.
     found_cache: Option<(String, Found)>,
+    /// Label settings from the web app (used for printing when a web app is set).
+    server_cfg: Option<Config>,
+    /// Version (fingerprint) of the web app's spreadsheet when products were last fetched.
+    server_version: String,
+    loading: bool,
+    /// After adding a product via the web app, open its check once the list arrives.
+    pending_check: Option<String>,
+    edit: Option<Edit>,
+}
+
+/// The web app's spreadsheet opened in Excel (or another app) for editing.
+struct Edit {
+    path: std::path::PathBuf,
+    /// Web app version that the local copy was downloaded as, or last uploaded as.
+    base: String,
+    /// Modified time of the local copy when last synced with the web app.
+    synced_mtime: Option<SystemTime>,
+    /// Modified time seen on the previous tick (uploads wait until it's stable).
+    seen: Option<SystemTime>,
+    busy: bool,
 }
 
 thread_local! {
@@ -271,6 +297,11 @@ pub fn run() {
                 add: null_mut(),
                 add_barcode: String::new(),
                 found_cache: None,
+                server_cfg: None,
+                server_version: String::new(),
+                loading: false,
+                pending_check: None,
+                edit: None,
             })
         });
 
@@ -297,6 +328,7 @@ pub fn run() {
         let refresh = child("BUTTON", "Refresh products", btn_style, 0, main, ID_REFRESH, ui_font);
         let settings = child("BUTTON", "Settings…", btn_style, 0, main, ID_SETTINGS, ui_font);
         let add = child("BUTTON", "Add bought-in product…", btn_style, 0, main, ID_ADD, ui_font);
+        let edit = child("BUTTON", "Edit spreadsheet…", btn_style, 0, main, ID_EDIT, ui_font);
         let lbl = child("STATIC", "Copies:", (SS_RIGHT | SS_CENTERIMAGE) as u32, 0, main, 0, ui_font);
         let copies = child("COMBOBOX", "", WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32, 0, main, ID_COPIES, ui_font);
         for i in 1..=10 {
@@ -312,7 +344,7 @@ pub fn run() {
             a.preview = preview;
             a.status = status;
             a.copies = copies;
-            a.tools = vec![refresh, settings, add, lbl, copies, status];
+            a.tools = vec![refresh, settings, add, edit, lbl, copies, status];
         });
 
         if autostart_enabled() {
@@ -357,7 +389,165 @@ pub fn run() {
 // ---------------------------------------------------------------------------
 // Loading
 
+fn server() -> Option<Server> {
+    with(|a| Server::from_cfg(&a.cfg)).flatten()
+}
+
+/// Settings used to lay out labels: the web app's when one is set (so both
+/// print the same label), with this PC's printer.
+fn label_cfg(a: &App) -> Config {
+    match &a.server_cfg {
+        Some(c) if !a.cfg.server_url.trim().is_empty() => {
+            let mut c = c.clone();
+            c.printer = a.cfg.printer.clone();
+            c
+        }
+        _ => a.cfg.clone(),
+    }
+}
+
+/// Puts a new product list in place. Returns (changed, first load).
+fn install_products(ps: Vec<Product>) -> (bool, bool) {
+    with(|a| {
+        a.last_load = Instant::now();
+        let changed = a.products != ps;
+        let first = a.products.is_empty();
+        if changed {
+            a.products = ps;
+            if let Some(pp) = &a.preview_product {
+                a.preview_product = a.products.iter().find(|p| p.name == pp.name).cloned();
+            }
+        }
+        (changed, first)
+    })
+    .unwrap_or((false, true))
+}
+
+fn unchecked_note(k: usize) -> String {
+    match k {
+        0 => String::new(),
+        1 => " – 1 bought-in product needs checking before it can print".into(),
+        k => format!(" – {k} bought-in products need checking before they can print"),
+    }
+}
+
+fn cache_path() -> std::path::PathBuf {
+    crate::config::data_dir().join("web-products.json")
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Cache {
+    products: Vec<Product>,
+    cfg: Config,
+    version: String,
+    saved: String,
+}
+
+type ProductsResult = Result<(Vec<Product>, Config, String), String>;
+
+/// Fetches the products from the web app on a worker thread.
+fn reload_remote(manual: bool, srv: Server) {
+    let Some((main, busy)) = with(|a| {
+        let busy = a.loading;
+        a.loading = true;
+        (a.main as usize, busy)
+    }) else {
+        return;
+    };
+    if busy {
+        return;
+    }
+    if manual {
+        set_status(&format!("Getting the products from the web app at {}…", srv.label));
+    }
+    std::thread::spawn(move || {
+        let res: ProductsResult = srv.products();
+        let b = Box::into_raw(Box::new((manual, res)));
+        unsafe {
+            if PostMessageW(main as HWND, WM_APP_PRODUCTS, 0, b as isize) == 0 {
+                drop(Box::from_raw(b));
+            }
+        }
+    });
+}
+
+fn on_products(manual: bool, res: ProductsResult) {
+    let Some(main) = with(|a| {
+        a.loading = false;
+        a.main
+    }) else {
+        return;
+    };
+    let label = server().map(|s| s.label).unwrap_or_default();
+    match res {
+        Ok((ps, cfg, version)) => {
+            let n = ps.len();
+            let unchecked = ps.iter().filter(|p| p.needs_check).count();
+            let cache = Cache { products: ps.clone(), cfg: cfg.clone(), version: version.clone(), saved: format!("{} {}", today(), now_hhmm()) };
+            if let Ok(json) = serde_json::to_vec_pretty(&cache) {
+                let _ = std::fs::create_dir_all(crate::config::data_dir());
+                let tmp = cache_path().with_extension("json.tmp");
+                if std::fs::write(&tmp, json).is_ok() {
+                    let _ = std::fs::rename(&tmp, cache_path());
+                }
+            }
+            with(|a| {
+                a.server_cfg = Some(cfg);
+                a.server_version = version;
+            });
+            let (changed, first) = install_products(ps);
+            if changed {
+                rebuild_buttons();
+            }
+            invalidate_preview();
+            set_status(&format!(
+                "{n} product{} from the web app at {}{}{}",
+                if n == 1 { "" } else { "s" },
+                now_hhmm(),
+                if changed && !manual && !first { " – updated" } else { "" },
+                unchecked_note(unchecked)
+            ));
+            if let Some(Some(bc)) = with(|a| a.pending_check.take()) {
+                if let Some(Some(idx)) = with(|a| a.products.iter().position(|p| p.barcode.as_deref() == Some(bc.as_str()) && p.needs_check)) {
+                    open_check(idx);
+                }
+            }
+        }
+        Err(e) => {
+            with(|a| a.last_load = Instant::now());
+            let has = with(|a| !a.products.is_empty()).unwrap_or(false);
+            let mut tail = if has { "Still using the last list.".to_string() } else { String::new() };
+            if !has {
+                if let Some(c) = std::fs::read(cache_path()).ok().and_then(|b| serde_json::from_slice::<Cache>(&b).ok()) {
+                    with(|a| {
+                        a.server_cfg = Some(c.cfg);
+                        a.server_version = c.version;
+                    });
+                    install_products(c.products);
+                    rebuild_buttons();
+                    invalidate_preview();
+                    tail = format!("Using the copy saved on {}.", c.saved);
+                } else {
+                    tail = "Check the web app address in Settings.".into();
+                    if let Some(h) = with(|a| a.host) {
+                        unsafe { InvalidateRect(h, null(), 1) };
+                    }
+                }
+            }
+            let _ = label;
+            set_status(&format!("{e}. {tail}"));
+            if manual {
+                message_box(main, &format!("{e}.\n\n{tail}"), MB_ICONWARNING);
+            }
+        }
+    }
+}
+
 fn reload(manual: bool) {
+    if let Some(srv) = server() {
+        reload_remote(manual, srv);
+        return;
+    }
     let Some((path, marking)) = with(|a| (a.cfg.spreadsheet.clone(), a.cfg.marking())) else { return };
     let p = Path::new(&path);
     let mtime = std::fs::metadata(p).and_then(|m| m.modified()).ok();
@@ -366,21 +556,8 @@ fn reload(manual: bool) {
         Ok(mut ps) => {
             let n = ps.len();
             let unchecked = apply_checked(&mut ps);
-            let changed = with(|a| {
-                a.last_mtime = mtime;
-                a.last_load = Instant::now();
-                let changed = a.products != ps;
-                let first = a.products.is_empty();
-                if changed {
-                    a.products = ps;
-                    if let Some(pp) = &a.preview_product {
-                        a.preview_product = a.products.iter().find(|p| p.name == pp.name).cloned();
-                    }
-                }
-                (changed, first)
-            })
-            .unwrap_or((false, true));
-            let (changed, first) = changed;
+            with(|a| a.last_mtime = mtime);
+            let (changed, first) = install_products(ps);
             if changed {
                 rebuild_buttons();
                 invalidate_preview();
@@ -390,11 +567,7 @@ fn reload(manual: bool) {
                 if n == 1 { "" } else { "s" },
                 now_hhmm(),
                 if changed && !manual && !first { " – updated" } else { "" },
-                match unchecked {
-                    0 => String::new(),
-                    1 => " – 1 bought-in product needs checking before it can print".into(),
-                    k => format!(" – {k} bought-in products need checking before they can print"),
-                }
+                unchecked_note(unchecked)
             ));
         }
         Err(e) => {
@@ -419,6 +592,11 @@ fn reload(manual: bool) {
 }
 
 fn poll() {
+    if server().is_some() {
+        // The web app's list is small: ask for it every minute.
+        reload(false);
+        return;
+    }
     let Some((path, last, loaded, mins)) =
         with(|a| (a.cfg.spreadsheet.clone(), a.last_mtime, a.last_load, a.cfg.refresh_minutes.max(1)))
     else {
@@ -443,13 +621,13 @@ fn layout_main() {
         let bh = s(34);
         let th = bh + 2 * pad;
         let mut x = pad;
-        let widths = [s(150), s(100), s(200), s(64), s(60)];
+        let widths = [s(150), s(100), s(200), s(150), s(64), s(60)];
         for (i, &tw) in widths.iter().enumerate() {
-            let (y, hh) = if i == 4 { (pad + s(5), s(300)) } else { (pad, bh) };
+            let (y, hh) = if i == 5 { (pad + s(5), s(300)) } else { (pad, bh) };
             MoveWindow(tools[i], x, y, tw, hh, 1);
             x += tw + pad;
         }
-        MoveWindow(tools[5], x, pad, (w - x - pad).max(0), bh, 1);
+        MoveWindow(tools[6], x, pad, (w - x - pad).max(0), bh, 1);
         let pw = s(340).min(w / 2);
         MoveWindow(host, 0, th, (w - pw).max(0), (h - th).max(0), 1);
         MoveWindow(preview, w - pw, th, pw, (h - th).max(0), 1);
@@ -677,7 +855,7 @@ fn spawn_print(product: Product, cfg: Config, copies: u32) {
 }
 
 fn on_product(idx: usize) {
-    let Some((p, cfg, copies_h)) = with(|a| (a.products.get(idx).cloned(), a.cfg.clone(), a.copies)) else { return };
+    let Some((p, cfg, copies_h)) = with(|a| (a.products.get(idx).cloned(), label_cfg(a), a.copies)) else { return };
     let Some(p) = p else { return };
     if p.needs_check {
         open_check(idx);
@@ -728,6 +906,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 ID_REFRESH => reload(true),
                 ID_SETTINGS => open_settings(),
                 ID_ADD => open_add(),
+                ID_EDIT => edit_spreadsheet(),
                 ID_TRAY_OPEN => show_from_tray(hwnd),
                 ID_TRAY_EXIT => {
                     DestroyWindow(hwnd);
@@ -738,6 +917,27 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
         }
         WM_TIMER if wp == TIMER_POLL => {
             poll();
+            0
+        }
+        WM_TIMER if wp == TIMER_EDIT => {
+            edit_tick();
+            0
+        }
+        WM_APP_PRODUCTS => {
+            let b = Box::from_raw(lp as *mut (bool, ProductsResult));
+            let (manual, res) = *b;
+            on_products(manual, res);
+            0
+        }
+        WM_APP_EDITREADY => {
+            let b = Box::from_raw(lp as *mut Result<(Vec<u8>, String), String>);
+            on_edit_ready(*b);
+            0
+        }
+        WM_APP_UPLOADED => {
+            let b = Box::from_raw(lp as *mut (Option<SystemTime>, Result<Upload, String>));
+            let (mtime, res) = *b;
+            on_uploaded(mtime, res);
             0
         }
         WM_APP_STATUS => {
@@ -858,7 +1058,7 @@ unsafe extern "system" fn preview_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPA
             let bmp = CreateCompatibleBitmap(hdc, rc.right.max(1), rc.bottom.max(1));
             let old_bmp = SelectObject(mem, bmp as _);
             FillRect(mem, &rc, GetSysColorBrush(COLOR_BTNFACE));
-            if let Some((product, cfg, font)) = with(|a| (a.preview_product.clone(), a.cfg.clone(), a.ui_font)) {
+            if let Some((product, cfg, font)) = with(|a| (a.preview_product.clone(), label_cfg(a), a.ui_font)) {
                 paint_preview(mem, &rc, product.as_ref(), &cfg, font);
             }
             BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
@@ -955,9 +1155,14 @@ fn open_settings() {
             c
         };
 
-        label("Spreadsheet file:", lx, y, lw);
+        label(if cfg.server_url.trim().is_empty() { "Spreadsheet file:" } else { "Spreadsheet (no web app only):" }, lx, y, lw);
         place(S_PATH, "EDIT", &cfg.spreadsheet, edit, WS_EX_CLIENTEDGE, cx, y, s(310), rh);
         place(S_BROWSE, "BUTTON", "Browse…", WS_TABSTOP, 0, cx + s(318), y, s(96), rh);
+        if !cfg.server_url.trim().is_empty() {
+            // The web app's spreadsheet is used; this one is only for running without it.
+            EnableWindow(GetDlgItem(wnd, S_PATH), 0);
+            EnableWindow(GetDlgItem(wnd, S_BROWSE), 0);
+        }
         y += step;
 
         label("Printer:", lx, y, lw);
@@ -1113,7 +1318,14 @@ fn save_settings(hwnd: HWND) -> bool {
     }
     let (path_changed, helper_changed) = with(|a| {
         let changed = a.cfg.spreadsheet != cfg.spreadsheet
-            || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets;
+            || a.cfg.allergens_in_brackets != cfg.allergens_in_brackets
+            || a.cfg.server_url != cfg.server_url
+            || a.cfg.server_key != cfg.server_key
+            || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed;
+        if a.cfg.server_url != cfg.server_url {
+            a.server_cfg = None;
+            a.server_version.clear();
+        }
         let helper = a.cfg.server_url != cfg.server_url
             || a.cfg.server_key != cfg.server_key
             || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed
@@ -1298,6 +1510,14 @@ fn apply_checked(ps: &mut [Product]) -> usize {
     lookup::apply_checked(ps, &lookup::Store::load())
 }
 
+/// The accepted details for a barcode: from the web app when one is set, else from this PC.
+fn checked_for(barcode: &str) -> Option<lookup::Checked> {
+    match server() {
+        Some(srv) => srv.checked(barcode).unwrap_or(None),
+        None => lookup::Store::load().products.get(barcode).cloned(),
+    }
+}
+
 unsafe extern "system" fn button_subclass(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, idx: usize) -> LRESULT {
     if msg == WM_RBUTTONUP {
         // Right-click a bought-in product to look at / re-check its details.
@@ -1366,11 +1586,12 @@ fn open_check(idx: usize) {
     };
     let Some(product) = product else { return };
     let Some(barcode) = product.barcode.clone() else { return };
+    if !existing.is_null() {
+        unsafe { SetForegroundWindow(existing) };
+        return;
+    }
+    let checked = checked_for(&barcode);
     unsafe {
-        if !existing.is_null() {
-            SetForegroundWindow(existing);
-            return;
-        }
         let cls = wide("AllergenCheck");
         let title = wide("Check bought-in product");
         let (w, h) = (s(720), s(600));
@@ -1392,7 +1613,6 @@ fn open_check(idx: usize) {
             hinst,
             null(),
         );
-        let checked = lookup::Store::load().products.get(&barcode).cloned();
         with(|a| {
             a.check = wnd;
             a.check_product = Some(product.clone());
@@ -1452,7 +1672,7 @@ fn open_check(idx: usize) {
         ShowWindow(wnd, SW_SHOW);
         SetFocus(GetDlgItem(wnd, C_ING));
     }
-    if lookup::Store::load().products.get(&barcode).is_none() {
+    if checked.is_none() {
         let cached = with(|a| a.found_cache.clone()).flatten().filter(|(bc, _)| *bc == barcode);
         match cached {
             Some((bc, f)) => on_lookup_result(bc, Ok(Some(f))),
@@ -1527,6 +1747,16 @@ fn accept_check(wnd: HWND) {
     let Some((product, found_name)) = with(|a| (a.check_product.clone(), a.check_found_name.clone())) else { return };
     let Some(product) = product else { return };
     let Some(barcode) = product.barcode.clone() else { return };
+    if let Some(srv) = server() {
+        if let Err(e) = srv.save_checked(&barcode, &ing, &may, &found_name) {
+            message_box(wnd, &format!("Couldn't save it to the web app:\n\n{e}"), MB_ICONWARNING);
+            return;
+        }
+        close_check();
+        reload(false);
+        set_status(&format!("{} checked and saved to the web app – it's ready to print.", product.name));
+        return;
+    }
     let mut store = lookup::Store::load();
     store.products.insert(
         barcode,
@@ -1726,6 +1956,17 @@ fn do_add(wnd: HWND) {
         message_box(wnd, &format!("\"{existing}\" is already in the spreadsheet with that name or barcode."), MB_ICONWARNING);
         return;
     }
+    if let Some(srv) = server() {
+        if let Err(e) = srv.add(&bc, &name, &shop, days as u32) {
+            message_box(wnd, &format!("Couldn't add it to the web app's spreadsheet:\n\n{e}"), MB_ICONWARNING);
+            return;
+        }
+        close_add();
+        with(|a| a.pending_check = Some(bc.clone()));
+        reload(false);
+        set_status(&format!("{name} added to the web app's spreadsheet – check its ingredients against the pack to finish."));
+        return;
+    }
     let mut values = vec![name.clone(), format!("Shelf life: {days} day{}", if days == 1 { "" } else { "s" }), format!("Barcode: {bc}")];
     if !shop.is_empty() {
         values.push(shop);
@@ -1763,6 +2004,223 @@ unsafe extern "system" fn add_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM)
             0
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Edit spreadsheet: open the web app's spreadsheet in Excel (or whatever opens
+// .xlsx files) and send it back to the web app each time it's saved.
+
+fn shell_open(owner: HWND, path: &Path) -> bool {
+    let verb = wide("open");
+    let file = wide(&path.to_string_lossy());
+    let r = unsafe { ShellExecuteW(owner, verb.as_ptr(), file.as_ptr(), null(), null(), SW_SHOWNORMAL) } as isize;
+    if r <= 32 {
+        let why = match r {
+            31 => "there's no app set up to open .xlsx files on this PC (install Excel or LibreOffice)".to_string(),
+            2 | 3 => "the file couldn't be found".to_string(),
+            5 => "access was denied".to_string(),
+            n => format!("Windows error {n}"),
+        };
+        message_box(owner, &format!("Couldn't open {}:\n\n{why}.", path.display()), MB_ICONWARNING);
+        return false;
+    }
+    true
+}
+
+fn edit_copy_path() -> std::path::PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(crate::config::data_dir);
+    base.join("AllergenLabels").join("Products (web app).xlsx")
+}
+
+fn mtime_of(p: &Path) -> Option<SystemTime> {
+    std::fs::metadata(p).and_then(|m| m.modified()).ok()
+}
+
+fn edit_spreadsheet() {
+    let Some(main) = with(|a| a.main) else { return };
+    let Some(srv) = server() else {
+        let path = with(|a| a.cfg.spreadsheet.clone()).unwrap_or_default();
+        if path.trim().is_empty() {
+            message_box(main, "Choose the spreadsheet in Settings first.", MB_ICONINFORMATION);
+        } else {
+            shell_open(main, Path::new(&path));
+        }
+        return;
+    };
+    // Already editing: reopen the same copy, unless it's unchanged and the web app has moved on.
+    let state = with(|a| {
+        a.edit.as_ref().map(|e| (e.path.clone(), e.busy, e.synced_mtime == mtime_of(&e.path), e.base != a.server_version && !a.server_version.is_empty()))
+    })
+    .flatten();
+    if let Some((path, busy, unchanged, stale)) = state {
+        if busy || !(unchanged && stale) {
+            if path.exists() {
+                shell_open(main, &path);
+                return;
+            }
+        }
+    }
+    set_status(&format!("Getting the spreadsheet from the web app at {}…", srv.label));
+    let m = main as usize;
+    std::thread::spawn(move || {
+        let res = srv.download();
+        let b = Box::into_raw(Box::new(res));
+        unsafe {
+            if PostMessageW(m as HWND, WM_APP_EDITREADY, 0, b as isize) == 0 {
+                drop(Box::from_raw(b));
+            }
+        }
+    });
+}
+
+fn on_edit_ready(res: Result<(Vec<u8>, String), String>) {
+    let Some(main) = with(|a| a.main) else { return };
+    let (bytes, version) = match res {
+        Ok(v) => v,
+        Err(e) => {
+            set_status(&format!("Couldn't get the spreadsheet: {e}"));
+            message_box(main, &format!("Couldn't get the spreadsheet from the web app:\n\n{e}"), MB_ICONWARNING);
+            return;
+        }
+    };
+    let path = edit_copy_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Err(e) = std::fs::write(&path, &bytes) {
+        // Most likely it's still open in Excel from last time.
+        if path.exists() {
+            set_status("The spreadsheet is already open – save it there and the web app is updated.");
+            shell_open(main, &path);
+        } else {
+            message_box(main, &format!("Couldn't save a copy to edit:\n\n{e}"), MB_ICONWARNING);
+        }
+        return;
+    }
+    let mtime = mtime_of(&path);
+    with(|a| {
+        a.edit = Some(Edit { path: path.clone(), base: version, synced_mtime: mtime, seen: mtime, busy: false });
+    });
+    unsafe { SetTimer(main, TIMER_EDIT, 2_000, None) };
+    if shell_open(main, &path) {
+        set_status("Spreadsheet opened – each time you save it, the changes go straight to the web app.");
+    }
+}
+
+/// Every 2 seconds while editing: once a save has settled, send it to the web app.
+fn edit_tick() {
+    let Some(Some((path, base, synced, seen, busy))) =
+        with(|a| a.edit.as_ref().map(|e| (e.path.clone(), e.base.clone(), e.synced_mtime, e.seen, e.busy)))
+    else {
+        return;
+    };
+    if busy {
+        return;
+    }
+    let now = mtime_of(&path);
+    if now.is_none() || now == synced {
+        return;
+    }
+    if now != seen {
+        // Changed since the last tick: wait until the save has finished.
+        with(|a| {
+            if let Some(e) = a.edit.as_mut() {
+                e.seen = now;
+            }
+        });
+        return;
+    }
+    let Ok(bytes) = std::fs::read(&path) else { return }; // locked mid-save: try again next tick
+    if xlsx::version_of(&bytes) == base {
+        // Saved without changes.
+        with(|a| {
+            if let Some(e) = a.edit.as_mut() {
+                e.synced_mtime = now;
+            }
+        });
+        return;
+    }
+    upload_edit(bytes, base, now, false);
+}
+
+fn upload_edit(bytes: Vec<u8>, base: String, mtime: Option<SystemTime>, force: bool) {
+    let Some(srv) = server() else { return };
+    let Some(main) = with(|a| {
+        if let Some(e) = a.edit.as_mut() {
+            e.busy = true;
+        }
+        a.main as usize
+    }) else {
+        return;
+    };
+    set_status("Sending your spreadsheet changes to the web app…");
+    std::thread::spawn(move || {
+        let res = srv.upload(&bytes, &base, force);
+        let b = Box::into_raw(Box::new((mtime, res)));
+        unsafe {
+            if PostMessageW(main as HWND, WM_APP_UPLOADED, 0, b as isize) == 0 {
+                drop(Box::from_raw(b));
+            }
+        }
+    });
+}
+
+fn on_uploaded(mtime: Option<SystemTime>, res: Result<Upload, String>) {
+    let Some(main) = with(|a| a.main) else { return };
+    let done = |base: Option<String>| {
+        with(|a| {
+            if let Some(e) = a.edit.as_mut() {
+                e.busy = false;
+                e.synced_mtime = mtime;
+                e.seen = mtime;
+                if let Some(b) = base {
+                    e.base = b;
+                }
+            }
+        });
+    };
+    match res {
+        Ok(Upload::Saved(v)) => {
+            done(Some(v));
+            set_status(&format!("Spreadsheet saved to the web app at {}.", now_hhmm()));
+            reload(false);
+        }
+        Ok(Upload::Conflict) => {
+            let text = wide(
+                "The web app's spreadsheet has changed since you opened it (a product was added, edited, or checked on the web app or another PC).\n\n\
+                 Yes – replace it with your version. Changes made on the web app since you opened the file are lost.\n\n\
+                 No – keep the web app's version. Close the file without saving, then click Edit spreadsheet again to get the latest.",
+            );
+            let cap = wide(APP_TITLE);
+            let r = unsafe { MessageBoxW(main, text.as_ptr(), cap.as_ptr(), MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) };
+            let path = with(|a| a.edit.as_ref().map(|e| e.path.clone())).flatten();
+            match (r, path.and_then(|p| std::fs::read(p).ok())) {
+                (IDYES, Some(bytes)) => {
+                    let base = with(|a| a.edit.as_ref().map(|e| e.base.clone())).flatten().unwrap_or_default();
+                    upload_edit(bytes, base, mtime, true);
+                }
+                _ => {
+                    done(None);
+                    set_status("Your spreadsheet changes weren't sent – the web app's version was kept.");
+                }
+            }
+        }
+        Ok(Upload::Rejected(e)) => {
+            done(None);
+            set_status("The web app didn't accept the spreadsheet.");
+            message_box(main, &format!("The web app didn't accept the spreadsheet:\n\n{e}\n\nFix it and save again."), MB_ICONWARNING);
+        }
+        Err(e) => {
+            // Network trouble: leave it unsynced so the next tick tries again.
+            with(|a| {
+                if let Some(ed) = a.edit.as_mut() {
+                    ed.busy = false;
+                }
+            });
+            set_status(&format!("{e} – will try sending your spreadsheet changes again."));
+        }
     }
 }
 

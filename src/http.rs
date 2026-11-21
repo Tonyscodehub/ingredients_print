@@ -47,6 +47,19 @@ pub struct Req<'a> {
 }
 
 pub fn request(r: &Req, user_agent: &str) -> Result<(u32, String), String> {
+    let resp = send(r, user_agent)?;
+    Ok((resp.status, String::from_utf8_lossy(&resp.body).into_owned()))
+}
+
+pub struct Resp {
+    pub status: u32,
+    pub body: Vec<u8>,
+    /// The server's X-Version header, if any (spreadsheet fingerprint).
+    pub version: Option<String>,
+}
+
+/// Like `request`, but keeps the body as bytes and returns the X-Version header.
+pub fn send(r: &Req, user_agent: &str) -> Result<Resp, String> {
     let (host, path, method) = (r.host, r.path, r.method);
     unsafe {
         let agent = wide(user_agent);
@@ -99,6 +112,17 @@ pub fn request(r: &Req, user_agent: &str) -> Result<(u32, String), String> {
             &mut len,
             null_mut(),
         );
+        // Custom header X-Version (WINHTTP_QUERY_CUSTOM = 65).
+        let version = {
+            let name = wide("X-Version");
+            let mut buf = vec![0u16; 256];
+            let mut blen: u32 = (buf.len() * 2) as u32;
+            if WinHttpQueryHeaders(req.0, 65, name.as_ptr(), buf.as_mut_ptr() as *mut c_void, &mut blen, null_mut()) != 0 {
+                Some(String::from_utf16_lossy(&buf[..(blen as usize / 2)]).trim().to_string())
+            } else {
+                None
+            }
+        };
         let mut body = Vec::new();
         loop {
             let mut avail: u32 = 0;
@@ -115,11 +139,11 @@ pub fn request(r: &Req, user_agent: &str) -> Result<(u32, String), String> {
                 return Err(fail("reading the reply"));
             }
             body.truncate(start + read as usize);
-            if body.len() > 4_000_000 {
+            if body.len() > 60_000_000 {
                 return Err("reply was unexpectedly large".into());
             }
         }
-        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+        Ok(Resp { status, body, version })
     }
 }
 

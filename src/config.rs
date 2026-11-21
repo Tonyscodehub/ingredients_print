@@ -82,9 +82,14 @@ pub fn exe_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn config_path() -> PathBuf {
+/// %APPDATA%\AllergenLabels (falls back to the exe's folder).
+pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(exe_dir);
-    base.join("AllergenLabels").join("settings.json")
+    base.join("AllergenLabels")
+}
+
+fn config_path() -> PathBuf {
+    data_dir().join("settings.json")
 }
 
 impl Config {
