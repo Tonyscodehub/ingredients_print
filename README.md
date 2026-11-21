@@ -153,6 +153,7 @@ When the Windows app has a web app address in Settings, it uses the web app's sp
 - The product list is fetched every minute, and when you press **Refresh products**. A copy is kept on the PC, so the buttons still work if the web app can't be reached.
 - **Add bought-in product…** and the checking screen save to the web app.
 - **Edit spreadsheet…** downloads the web app's spreadsheet and opens it in Excel (or whatever opens .xlsx files on that PC). Each time you save, the changes are sent straight back to the web app, and the old version is kept as `Products (backup).xlsx` in the `data` folder. Keep editing and saving as often as you like.
+- The web page has an **Edit spreadsheet** button too. It asks the Windows app on the PC to open the spreadsheet in Excel there, exactly as if you'd pressed the button in the Windows app. It needs the Windows app running (it shows as the print helper). From another computer, use the download and upload links in the web page's Settings.
 - If someone adds, edits, or checks a product on the web app while the file is open in Excel, saving asks before overwriting: **Yes** keeps your version, **No** keeps the web app's. Then close the file and press **Edit spreadsheet…** again for a fresh copy.
 - A file that can't be read as a spreadsheet is refused, and the web app keeps its current one.
 - The spreadsheet setting in the Windows app is then greyed out. It's only used when no web app address is set.

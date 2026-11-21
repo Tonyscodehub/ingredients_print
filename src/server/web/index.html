@@ -126,6 +126,7 @@
   <button class="tool" id="btn-refresh" title="Re-read the spreadsheet now">Refresh</button>
   <button class="tool" id="btn-add">Add bought-in product…</button>
   <button class="tool" id="btn-sub">Add sub-ingredient…</button>
+  <button class="tool" id="btn-edit" title="Open the spreadsheet in Excel on the PC">Edit spreadsheet</button>
   <button class="tool" id="btn-settings">Settings…</button>
   <label class="copies">Copies <select id="copies"></select></label>
   <span id="status">Loading…</span>
@@ -264,7 +265,7 @@
       <div class="field"><label for="s-label_width_mm">Label width (mm)</label><input type="number" id="s-label_width_mm" min="20" max="120" step="0.5"></div>
       <div class="field"><label for="s-margin_mm">Extra side margin (mm)</label><input type="number" id="s-margin_mm" min="0" max="20" step="0.5"></div>
     </div>
-    <p class="note">The printer itself is chosen on the PC, in the Windows app's Settings. To edit the spreadsheet in Excel, use <b>Edit spreadsheet</b> in the Windows app, or <a href="/api/spreadsheet" download="Products.xlsx">download a copy</a>.</p>
+    <p class="note">The printer itself is chosen on the PC, in the Windows app's Settings. <b>Edit spreadsheet</b> opens the spreadsheet in Excel on the PC running the Windows app; each save comes straight back here. From another computer, <a href="/api/spreadsheet" download="Products.xlsx">download a copy</a>, edit it, then <a href="#" id="upload-link">upload it</a> to replace this one.<input type="file" id="upload-file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden></p>
     <p class="msg" id="s-msg"></p>
     <div class="actions">
       <button type="button" class="tool primary" id="s-save">Save</button>
@@ -536,6 +537,29 @@ async function watchJob(id, name) {
 // ---- Dialogs ---------------------------------------------------------------
 document.querySelectorAll("dialog [data-close]").forEach((b) => b.addEventListener("click", () => b.closest("dialog").close()));
 document.querySelectorAll("dialog form").forEach((f) => f.addEventListener("submit", (e) => e.preventDefault()));
+
+$("btn-edit").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/edit-spreadsheet", {});
+    toast(`Asking ${r.pc} to open the spreadsheet in Excel…`);
+    watchJob(r.id, "the spreadsheet");
+  } catch (e) { toast(e.message, true); }
+});
+
+$("upload-link").addEventListener("click", (e) => { e.preventDefault(); $("upload-file").click(); });
+$("upload-file").addEventListener("change", async () => {
+  const f = $("upload-file").files[0];
+  $("upload-file").value = "";
+  if (!f) return;
+  if (!confirm(`Replace the spreadsheet with ${f.name}? The current one is kept as a backup.`)) return;
+  try {
+    const r = await fetch("/api/spreadsheet", { method: "POST", headers: { "x-force": "1", "content-type": f.type || "application/octet-stream" }, body: f });
+    let d = null; try { d = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((d && d.error) || ("Error " + r.status));
+    toast(d.unchanged ? "That file is the same as the current spreadsheet." : `Spreadsheet replaced – ${d.count} products`);
+    loadState();
+  } catch (e) { toast(e.message, true); }
+});
 
 $("btn-refresh").addEventListener("click", async () => {
   try { const r = await api("/api/refresh", {}); toast(`Re-read the spreadsheet – ${r.count} products`); }

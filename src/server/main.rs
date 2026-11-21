@@ -56,7 +56,8 @@ struct Inner {
     jobs: VecDeque<Job>,
     results: HashMap<u64, JobStatus>,
     next_id: u64,
-    helper: Option<(Instant, String)>,
+    /// Last poll from the print helper: when, its PC name, and whether it can open the spreadsheet in Excel.
+    helper: Option<(Instant, String, bool)>,
     found_cache: HashMap<String, Found>,
 }
 
@@ -215,6 +216,7 @@ async fn main() {
         .route("/api/product/duplicate", post(api_duplicate_product))
         .route("/api/sub", post(api_add_sub))
         .route("/api/helper/next", get(api_helper_next))
+        .route("/api/edit-spreadsheet", post(api_edit_sheet))
         .route("/api/helper/result", post(api_helper_result))
         .with_state(state.clone());
 
@@ -282,8 +284,8 @@ async fn api_state(State(app): State<App>) -> Response {
             label: if p.needs_check { Vec::new() } else { content::paragraphs(p, &g.cfg, t) },
         })
         .collect();
-    let helper = g.helper.as_ref().map(|(seen, name)| {
-        json!({ "connected": seen.elapsed() < HELPER_TIMEOUT, "name": name, "seconds_ago": seen.elapsed().as_secs() })
+    let helper = g.helper.as_ref().map(|(seen, name, can_edit)| {
+        json!({ "connected": seen.elapsed() < HELPER_TIMEOUT, "name": name, "seconds_ago": seen.elapsed().as_secs(), "can_edit": can_edit })
     });
     let file = app.spreadsheet().file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     Json(json!({
@@ -336,13 +338,38 @@ async fn api_print(State(app): State<App>, Json(req): Json<PrintReq>) -> Respons
     }
     let id = g.next_id;
     g.next_id += 1;
-    let msg = JobMsg { id, product: p, cfg: g.cfg.clone(), copies: req.copies.clamp(1, 20) };
+    let msg = JobMsg { id, kind: String::new(), product: p, cfg: g.cfg.clone(), copies: req.copies.clamp(1, 20) };
     g.jobs.push_back(Job { msg, created: Instant::now() });
     g.results.insert(id, JobStatus { state: "queued", message: "Waiting for the print helper…".into() });
-    let connected = g.helper.as_ref().map_or(false, |(seen, _)| seen.elapsed() < HELPER_TIMEOUT);
+    let connected = g.helper.as_ref().map_or(false, |(seen, _, _)| seen.elapsed() < HELPER_TIMEOUT);
     drop(g);
     app.notify.notify_one();
     Json(json!({ "id": id, "helper_connected": connected })).into_response()
+}
+
+/// Asks the Windows app (print helper) to open the web app's spreadsheet in Excel on its PC.
+async fn api_edit_sheet(State(app): State<App>) -> Response {
+    let mut g = app.inner.lock().unwrap();
+    let helper = g.helper.clone().filter(|(seen, _, _)| seen.elapsed() < HELPER_TIMEOUT);
+    let Some((_, name, can_edit)) = helper else {
+        return err(
+            StatusCode::CONFLICT,
+            "The Windows app on the PC isn't connected, so it can't open the spreadsheet. Start it, or download the spreadsheet from Settings.",
+        );
+    };
+    if !can_edit {
+        return err(StatusCode::CONFLICT, format!("The Windows app on {name} is an older version that can't open the spreadsheet. Update AllergenLabels.exe on that PC."));
+    }
+    // Drop any earlier request that hasn't been collected yet.
+    g.jobs.retain(|j| j.msg.kind != "edit");
+    let id = g.next_id;
+    g.next_id += 1;
+    let msg = JobMsg { id, kind: "edit".into(), product: Product::default(), cfg: Config::default(), copies: 0 };
+    g.jobs.push_back(Job { msg, created: Instant::now() });
+    g.results.insert(id, JobStatus { state: "queued", message: format!("Asking {name} to open the spreadsheet…") });
+    drop(g);
+    app.notify.notify_one();
+    Json(json!({ "id": id, "pc": name })).into_response()
 }
 
 async fn api_job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
@@ -369,6 +396,9 @@ fn helper_allowed(app: &AppState, headers: &HeaderMap) -> bool {
 struct NextQuery {
     #[serde(default)]
     name: String,
+    /// "edit" when the helper can open the spreadsheet in Excel (newer Windows app).
+    #[serde(default)]
+    caps: String,
 }
 
 async fn api_helper_next(State(app): State<App>, headers: HeaderMap, Query(q): Query<NextQuery>) -> Response {
@@ -380,13 +410,14 @@ async fn api_helper_next(State(app): State<App>, headers: HeaderMap, Query(q): Q
     loop {
         {
             let mut g = app.inner.lock().unwrap();
-            g.helper = Some((Instant::now(), name.clone()));
+            g.helper = Some((Instant::now(), name.clone(), q.caps.split(',').any(|c| c.trim() == "edit")));
             while let Some(job) = g.jobs.pop_front() {
                 if job.created.elapsed() > JOB_EXPIRY {
                     g.results.insert(job.msg.id, JobStatus { state: "failed", message: "Too old – not printed.".into() });
                     continue;
                 }
-                g.results.insert(job.msg.id, JobStatus { state: "printing", message: format!("Printing on {name}…") });
+                let msg = if job.msg.kind == "edit" { format!("Opening the spreadsheet on {name}…") } else { format!("Printing on {name}…") };
+                g.results.insert(job.msg.id, JobStatus { state: "printing", message: msg });
                 return Json(job.msg).into_response();
             }
         }

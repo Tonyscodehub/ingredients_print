@@ -63,6 +63,7 @@ const WM_APP_TRAY: u32 = WM_APP + 5;
 const WM_APP_PRODUCTS: u32 = WM_APP + 6;
 const WM_APP_UPLOADED: u32 = WM_APP + 7;
 const WM_APP_EDITREADY: u32 = WM_APP + 8;
+const WM_APP_EDITREQ: u32 = WM_APP + 9;
 const ID_TRAY_OPEN: usize = 9001;
 const ID_TRAY_EXIT: usize = 9002;
 
@@ -927,6 +928,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             let b = Box::from_raw(lp as *mut (bool, ProductsResult));
             let (manual, res) = *b;
             on_products(manual, res);
+            0
+        }
+        WM_APP_EDITREQ => {
+            edit_spreadsheet();
             0
         }
         WM_APP_EDITREADY => {
@@ -2281,7 +2286,7 @@ fn start_helper() {
             }
         };
         while alive() {
-            let path = format!("{base}/api/helper/next?name={}", url_encode(&pc));
+            let path = format!("{base}/api/helper/next?name={}&caps=edit", url_encode(&pc));
             let req = crate::http::Req {
                 secure,
                 host: &host,
@@ -2304,6 +2309,26 @@ fn start_helper() {
                         pause(5);
                         continue;
                     };
+                    if job.kind == "edit" {
+                        // The web page asked to edit the spreadsheet: open it in Excel here.
+                        unsafe { PostMessageW(main as HWND, WM_APP_EDITREQ, 0, 0) };
+                        let body = serde_json::json!({ "id": job.id, "ok": true, "message": format!("Opening the spreadsheet in Excel on {pc}. Save it there and the changes come back here.") }).to_string();
+                        let h2 = format!("{headers}Content-Type: application/json\r\n");
+                        let rpath = format!("{base}/api/helper/result");
+                        let post = crate::http::Req {
+                            secure,
+                            host: &host,
+                            port,
+                            method: "POST",
+                            path: &rpath,
+                            body: Some(body.as_bytes()),
+                            headers: &h2,
+                            insecure: cfg.server_allow_self_signed,
+                            receive_timeout_ms: 15_000,
+                        };
+                        let _ = crate::http::request(&post, agent);
+                        continue;
+                    }
                     let mut jcfg = job.cfg.clone();
                     jcfg.printer = cfg.printer.clone();
                     let name = job.product.name.clone();

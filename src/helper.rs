@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JobMsg {
     pub id: u64,
+    /// "" = print a label; "edit" = open the web app's spreadsheet in Excel on the PC.
+    #[serde(default)]
+    pub kind: String,
     pub product: Product,
     /// Label settings from the server (the helper keeps its own printer choice).
     pub cfg: Config,
