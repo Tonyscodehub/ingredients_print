@@ -65,6 +65,12 @@
   .product .edit:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   #grid.compact .product .edit { top: 2px; right: 26px; width: 20px; height: 20px; }
   #grid.compact .product .edit svg { width: 12px; height: 12px; }
+  .product .peek { position: absolute; top: 4px; right: 64px; width: 26px; height: 26px; border-radius: 6px; display: flex;
+    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
+  .product .peek svg { width: 16px; height: 16px; }
+  .product .peek:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  #grid.compact .product .peek { top: 2px; right: 50px; width: 20px; height: 20px; }
+  #grid.compact .product .peek svg { width: 13px; height: 13px; }
   .ing-list { display: flex; flex-direction: column; gap: 6px; }
   .ing-row { display: flex; gap: 6px; align-items: center; }
   .ing-row input { flex: 1; min-width: 0; }
@@ -137,7 +143,7 @@
   <aside>
     <h2 id="preview-title">Label preview</h2>
     <div id="preview"></div>
-    <p id="preview-hint">Press a product to print its label. It will be shown here.</p>
+    <p id="preview-hint">Press a product to print its label, or its eye to preview it. It will be shown here.</p>
   </aside>
 </main>
 <div id="toast"></div>
@@ -283,6 +289,7 @@ if (params.get("embed") === "1" || window.self !== window.top) document.body.cla
 let state = null;
 let signature = "";
 let previewName = null;
+let previewMode = "printed"; // "printed" or "preview"
 
 async function api(path, body) {
   const opts = body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
@@ -409,6 +416,15 @@ function renderButtons() {
     ed.addEventListener("click", (e) => { e.stopPropagation(); openEdit(p.name); });
     ed.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
     b.appendChild(ed);
+    const pk = document.createElement("span");
+    pk.className = "peek";
+    pk.setAttribute("role", "button");
+    pk.setAttribute("aria-label", "Preview the label for " + p.name);
+    pk.title = "Preview the label (doesn't print)";
+    pk.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+    pk.addEventListener("click", (e) => { e.stopPropagation(); previewName = p.name; previewMode = "preview"; renderPreview(); });
+    pk.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+    b.appendChild(pk);
     if (!p.barcode) {
       const add = document.createElement("span");
       add.className = "addsub";
@@ -460,9 +476,16 @@ function renderPreview() {
   const box = $("preview");
   const p = previewName && state.products.find((x) => x.name === previewName);
   box.innerHTML = "";
-  if (!p || !p.label.length) { $("preview-hint").hidden = false; $("preview-title").textContent = "Label preview"; return; }
-  $("preview-hint").hidden = true;
-  $("preview-title").textContent = "Last label printed";
+  const hint = $("preview-hint");
+  if (!p || !p.label.length) {
+    hint.hidden = false;
+    hint.textContent = p ? `Check ${p.name}'s ingredients against the pack before it can be previewed or printed.`
+                         : "Press a product to print its label, or its eye to preview it. It will be shown here.";
+    $("preview-title").textContent = "Label preview";
+    return;
+  }
+  hint.hidden = true;
+  $("preview-title").textContent = previewMode === "preview" ? `Preview – not printed` : "Last label printed";
   const width = box.clientWidth || 300;
   const dpi = width / (Math.max(20, state.label_width_mm) / 25.4);
   const pt = (v) => (v * dpi) / 72 + "px";
@@ -509,6 +532,7 @@ async function onProduct(name, btn) {
   if (!p) return;
   if (p.needs_check) { openCheck(name); return; }
   previewName = name;
+  previewMode = "printed";
   renderPreview();
   const copies = Number($("copies").value) || 1;
   btn.classList.add("busy");
@@ -872,6 +896,7 @@ $("sub-go").addEventListener("click", async () => {
     $("dlg-sub").close();
     toast(`${$("sub-name").value.trim()} added to ${$("sub-product").value}.`);
     previewName = $("sub-product").value;
+    previewMode = "preview";
     signature = "";
     await loadState();
   } catch (e) { $("sub-msg").textContent = e.message; }
