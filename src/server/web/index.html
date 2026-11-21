@@ -44,33 +44,24 @@
   .product:hover { background: var(--btn-hover); }
   .product:active { transform: scale(.985); }
   .product .sub { font-weight: 500; font-size: .55em; color: var(--warn); margin-top: .35em; }
-  #grid.compact .product { padding: 4px 6px; border-radius: 8px; }
+  #grid.compact .product { padding-left: 6px; padding-right: 6px; padding-bottom: 4px; border-radius: 8px; }
   #grid.compact .product .sub { font-size: .7em; margin-top: .1em; }
   .product.busy { opacity: .6; }
   .product { position: relative; }
-  .product .del { position: absolute; top: 4px; right: 4px; width: 26px; height: 26px; border-radius: 6px; display: flex;
-    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
-  .product .del svg { width: 16px; height: 16px; }
+  /* Corner icons scale with the tiles (--ic is set by layoutButtons) and sit above the name. */
+  #grid { --ic: 52px; }
+  .product { padding-top: calc(var(--ic) + 8px); }
+  .product .del, .product .edit, .product .peek, .product .addsub { position: absolute; top: 4px; width: var(--ic); height: var(--ic);
+    border-radius: calc(var(--ic) * .2); display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: .6; }
+  .product .del svg, .product .edit svg, .product .peek svg { width: calc(var(--ic) * .58); height: calc(var(--ic) * .58); }
+  .product .del { right: 4px; }
+  .product .edit { right: calc(var(--ic) + 8px); }
+  .product .peek { right: calc(var(--ic) * 2 + 12px); }
+  .product .addsub { left: 4px; font-weight: 600; font-size: calc(var(--ic) * .78); line-height: 1; }
   .product .del:hover { opacity: 1; color: var(--bad); background: color-mix(in srgb, var(--bad) 10%, transparent); }
-  #grid.compact .product .del { top: 2px; right: 2px; width: 20px; height: 20px; }
-  #grid.compact .product .del svg { width: 13px; height: 13px; }
-  .tool.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
-  .product .addsub { position: absolute; top: 4px; left: 4px; width: 26px; height: 26px; border-radius: 6px; display: flex;
-    align-items: center; justify-content: center; color: var(--muted); opacity: .55; font-weight: 600; font-size: 20px; line-height: 1; }
+  .product .edit:hover, .product .peek:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
   .product .addsub:hover { opacity: 1; color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
-  #grid.compact .product .addsub { top: 2px; left: 2px; width: 20px; height: 20px; font-size: 16px; }
-  .product .edit { position: absolute; top: 4px; right: 34px; width: 26px; height: 26px; border-radius: 6px; display: flex;
-    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
-  .product .edit svg { width: 15px; height: 15px; }
-  .product .edit:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  #grid.compact .product .edit { top: 2px; right: 26px; width: 20px; height: 20px; }
-  #grid.compact .product .edit svg { width: 12px; height: 12px; }
-  .product .peek { position: absolute; top: 4px; right: 64px; width: 26px; height: 26px; border-radius: 6px; display: flex;
-    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
-  .product .peek svg { width: 16px; height: 16px; }
-  .product .peek:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
-  #grid.compact .product .peek { top: 2px; right: 50px; width: 20px; height: 20px; }
-  #grid.compact .product .peek svg { width: 13px; height: 13px; }
+  .tool.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
   .ing-list { display: flex; flex-direction: column; gap: 6px; }
   .ing-row { display: flex; gap: 6px; align-items: center; }
   .ing-row input { flex: 1; min-width: 0; }
@@ -359,7 +350,8 @@ function renderStatus() {
 // Make the buttons as big as possible with no scrolling. Only when they'd be smaller
 // than about a quarter of their usual size (minw x minh) does a scroll bar appear.
 function plan(n, w, h) {
-  const gap = n > 24 ? 8 : 12, minw = 100, minh = 44, maxh = 220;
+  // Big enough for the four touch icons (40px at the smallest) along the top and the name under them.
+  const gap = n > 24 ? 8 : 12, minw = 200, minh = 104, maxh = 240;
   let best = null;
   for (let cols = 1; cols <= Math.max(1, n); cols++) {
     const bw = Math.floor((w - gap * (cols + 1)) / cols);
@@ -465,8 +457,12 @@ function layoutButtons() {
   grid.style.gridTemplateColumns = `repeat(${p.cols}, minmax(0, 1fr))`;
   grid.style.gridAutoRows = p.bh + "px";
   grid.classList.toggle("compact", p.bh < 70);
+  // Corner icons: about a third of the tile's height, never under 40px (fingertip size),
+  // and the four must fit across the top with room between them.
+  const ic = Math.round(Math.max(40, Math.min(72, p.bh * 0.3, (p.bw - 30) / 4.4)));
+  grid.style.setProperty("--ic", ic + "px");
   const longest = Math.max(...state.products.map((x) => x.name.length), 1);
-  const px = Math.max(12, Math.min(36, Math.min(p.bh * 0.3, (p.bw * 2) / (longest * 0.55))));
+  const px = Math.max(12, Math.min(36, Math.min((p.bh - ic - 12) * 0.32, (p.bw * 2) / (longest * 0.55))));
   grid.style.fontSize = px + "px";
 }
 window.addEventListener("resize", layoutButtons);
