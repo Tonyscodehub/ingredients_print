@@ -59,6 +59,22 @@
     align-items: center; justify-content: center; color: var(--muted); opacity: .55; font-weight: 600; font-size: 20px; line-height: 1; }
   .product .addsub:hover { opacity: 1; color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent); }
   #grid.compact .product .addsub { top: 2px; left: 2px; width: 20px; height: 20px; font-size: 16px; }
+  .product .edit { position: absolute; top: 4px; right: 34px; width: 26px; height: 26px; border-radius: 6px; display: flex;
+    align-items: center; justify-content: center; color: var(--muted); opacity: .55; }
+  .product .edit svg { width: 15px; height: 15px; }
+  .product .edit:hover { opacity: 1; color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  #grid.compact .product .edit { top: 2px; right: 26px; width: 20px; height: 20px; }
+  #grid.compact .product .edit svg { width: 12px; height: 12px; }
+  .ing-list { display: flex; flex-direction: column; gap: 6px; }
+  .ing-row { display: flex; gap: 6px; align-items: center; }
+  .ing-row input { flex: 1; min-width: 0; }
+  .ing-row .num { width: 1.8em; text-align: right; color: var(--muted); font-size: 13px; }
+  .icon-btn { background: var(--btn); border: 1px solid var(--line); border-radius: 8px; width: 34px; height: 34px; display: inline-flex;
+    align-items: center; justify-content: center; cursor: pointer; padding: 0; color: var(--text); flex: none; }
+  .icon-btn:hover { background: var(--btn-hover); }
+  .icon-btn:disabled { opacity: .35; cursor: default; }
+  .icon-btn.bad:hover { color: var(--bad); }
+  .icon-btn svg { width: 16px; height: 16px; }
   .seg { display: flex; gap: 0; }
   .seg button { border-radius: 0; }
   .seg button:first-child { border-radius: 8px 0 0 8px; }
@@ -159,6 +175,31 @@
     <p class="note">This adds a new column to the spreadsheet (a backup copy of the old file is kept), then opens the checking screen so you can check the ingredients against the pack. If the spreadsheet is open in Excel, close it first.</p>
     <div class="actions">
       <button type="button" class="tool primary" id="add-go">Add product</button>
+      <button type="button" class="tool" data-close>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="dlg-edit">
+  <form method="dialog">
+    <h3 id="edit-title">Edit product</h3>
+    <div class="row"><label for="edit-name">Name</label><input type="text" id="edit-name" autocomplete="off"></div>
+    <div class="row"><label for="edit-shelf">Shelf life</label><div><select id="edit-shelf"></select></div></div>
+    <div class="field" id="edit-ings-wrap">
+      <label>Ingredients, in the order they're printed</label>
+      <div class="ing-list" id="edit-ings"></div>
+      <div><button type="button" class="tool" id="edit-add-ing">+ Add ingredient</button></div>
+      <p class="note" id="edit-hint"></p>
+    </div>
+    <div class="field" id="edit-bought" hidden>
+      <p class="note">This is bought in: its ingredients and "may contain" come from checking the pack.</p>
+      <div><button type="button" class="tool" id="edit-check">Check its ingredients…</button></div>
+    </div>
+    <div class="row" id="edit-may-row"><label for="edit-may">May contain</label><input type="text" id="edit-may" autocomplete="off" placeholder="e.g. nuts, sesame"></div>
+    <p class="msg" id="edit-msg"></p>
+    <div class="actions">
+      <button type="button" class="tool left" id="edit-dup">Save as a copy</button>
+      <button type="button" class="tool primary" id="edit-save">Save</button>
       <button type="button" class="tool" data-close>Cancel</button>
     </div>
   </form>
@@ -358,6 +399,15 @@ function renderButtons() {
     del.addEventListener("click", (e) => { e.stopPropagation(); openDelete(p.name); });
     del.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
     b.appendChild(del);
+    const ed = document.createElement("span");
+    ed.className = "edit";
+    ed.setAttribute("role", "button");
+    ed.setAttribute("aria-label", "Edit " + p.name);
+    ed.title = "Edit " + p.name;
+    ed.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9l-4-4L4 16v4z"/><path d="M14 6l4 4"/></svg>';
+    ed.addEventListener("click", (e) => { e.stopPropagation(); openEdit(p.name); });
+    ed.addEventListener("touchstart", (e) => e.stopPropagation(), { passive: true });
+    b.appendChild(ed);
     if (!p.barcode) {
       const add = document.createElement("span");
       add.className = "addsub";
@@ -578,6 +628,101 @@ $("add-go").addEventListener("click", async () => {
     toast(`${r.name} added – check its ingredients against the pack to finish.`);
     openCheck(r.name);
   } catch (e) { $("add-msg").textContent = e.message; }
+});
+
+// Edit a product
+let editOriginal = null, editData = null, editItems = [];
+const ICON_UP = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>';
+const ICON_DOWN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+const ICON_BIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>';
+function iconBtn(html, label, onClick, disabled, extra) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "icon-btn" + (extra ? " " + extra : ""); b.innerHTML = html;
+  b.setAttribute("aria-label", label); b.title = label; b.disabled = !!disabled;
+  b.addEventListener("click", onClick);
+  return b;
+}
+function renderIngs(focusIndex) {
+  const list = $("edit-ings");
+  list.innerHTML = "";
+  let toFocus = null;
+  editItems.forEach((it, i) => {
+    const row = document.createElement("div");
+    row.className = "ing-row";
+    const num = document.createElement("span");
+    num.className = "num"; num.textContent = i + 1 + ".";
+    const inp = document.createElement("input");
+    inp.type = "text"; inp.value = it.text; inp.autocomplete = "off";
+    inp.addEventListener("input", () => (it.text = inp.value));
+    // Enter adds a new ingredient just below.
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); editItems.splice(i + 1, 0, { text: "", row: null }); renderIngs(i + 1); } });
+    row.append(num, inp,
+      iconBtn(ICON_UP, "Move up", () => { [editItems[i - 1], editItems[i]] = [editItems[i], editItems[i - 1]]; renderIngs(i - 1); }, i === 0),
+      iconBtn(ICON_DOWN, "Move down", () => { [editItems[i + 1], editItems[i]] = [editItems[i], editItems[i + 1]]; renderIngs(i + 1); }, i === editItems.length - 1),
+      iconBtn(ICON_BIN, "Remove " + (it.text || "this ingredient"), () => { editItems.splice(i, 1); renderIngs(Math.min(i, editItems.length - 1)); }, false, "bad"));
+    list.appendChild(row);
+    if (i === focusIndex) toFocus = inp;
+  });
+  if (toFocus) { toFocus.focus(); toFocus.select(); }
+}
+function fillShelf(sel, value) {
+  sel.innerHTML = "";
+  const d = document.createElement("option");
+  d.value = ""; d.textContent = `Use the default (${state.default_days} day${state.default_days === 1 ? "" : "s"})`;
+  sel.appendChild(d);
+  for (let i = 1; i <= 30; i++) { const o = document.createElement("option"); o.value = i; o.textContent = i + (i === 1 ? " day" : " days"); sel.appendChild(o); }
+  if (value && value > 30) { const o = document.createElement("option"); o.value = value; o.textContent = value + " days"; sel.appendChild(o); }
+  sel.value = value ? String(value) : "";
+}
+async function openEdit(name) {
+  try { editData = await api("/api/product?name=" + encodeURIComponent(name)); } catch (e) { toast(e.message, true); return; }
+  editOriginal = name;
+  $("edit-title").textContent = "Edit " + name;
+  $("edit-name").value = editData.name;
+  fillShelf($("edit-shelf"), editData.shelf_life_days);
+  const bought = !!editData.barcode;
+  $("edit-ings-wrap").hidden = bought;
+  $("edit-may-row").hidden = bought;
+  $("edit-bought").hidden = !bought;
+  $("edit-may").value = editData.may_contain || "";
+  editItems = editData.ingredients.map((x) => ({ text: x.text, row: x.row }));
+  $("edit-hint").textContent = (state.brackets
+    ? "Allergens go in (round brackets), e.g. Butter (milk), or between *asterisks*. "
+    : "Allergens go between *asterisks*, e.g. *milk*. ")
+    + "A sub-ingredient's own list goes in [square brackets]. Press Enter in a box to add another below it.";
+  $("edit-msg").textContent = "";
+  renderIngs(-1);
+  $("dlg-edit").showModal();
+}
+function editPayload() {
+  return Object.assign({}, editData, {
+    name: $("edit-name").value,
+    shelf_life_days: $("edit-shelf").value ? Number($("edit-shelf").value) : null,
+    may_contain: $("edit-may").value,
+    ingredients: editItems.filter((x) => x.text.trim()).map((x) => ({ text: x.text, row: x.row })),
+  });
+}
+$("edit-add-ing").addEventListener("click", () => { editItems.push({ text: "", row: null }); renderIngs(editItems.length - 1); });
+$("edit-check").addEventListener("click", () => { $("dlg-edit").close(); openCheck(editOriginal); });
+$("edit-save").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/product/save", { original: editOriginal, product: editPayload() });
+    $("dlg-edit").close();
+    if (previewName === editOriginal) previewName = r.name;
+    toast(`${r.name} saved.`);
+    signature = "";
+    await loadState();
+  } catch (e) { $("edit-msg").textContent = e.message; }
+});
+$("edit-dup").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/product/duplicate", { product: editPayload() });
+    $("dlg-edit").close();
+    toast(`Copy saved as ${r.name}.`);
+    signature = "";
+    await loadState();
+    openEdit(r.name); // straight into the copy, e.g. to rename it
+  } catch (e) { $("edit-msg").textContent = e.message; }
 });
 
 // Add a sub-ingredient

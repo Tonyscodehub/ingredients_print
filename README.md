@@ -39,6 +39,17 @@ From top to bottom: the product name, "Ingredients:" with the bracketed allergen
 
 The default warning reads: "Made in a kitchen that handles a range of ingredients. No peanuts are used, but traces of other allergens may be present due to cross-contamination." The Food Standards Agency recommends that "may contain" style warnings name the specific allergens at risk (e.g. "may contain tree nuts") and are based on a risk assessment, so adjust it in Settings to suit the kitchen.
 
+## Editing products
+
+In the web app, press the pencil at the top right of a product's button:
+
+- **Rename** it, or change its **shelf life** (or leave it on the default).
+- **Ingredients:** edit any of them, use the arrows to **reorder**, the bin to **remove** one, and **+ Add ingredient** (or Enter in a box) to add one.
+- **May contain:** the product's "may contain" line.
+- **Save as a copy** keeps the original as it was and adds a copy with what's in the editor, named "… (copy)" unless you've given it a new name. The copy then opens so you can rename it.
+
+Changes go straight into the spreadsheet (the previous version is kept as `Products (backup).xlsx`). Ingredients you don't change keep their formatting. For bought-in products you can rename, change the shelf life, or copy them; their ingredients come from checking the pack.
+
 ## Sub-ingredients (e.g. Biscoff spread in a Biscoff brownie)
 
 In the web app, press **+** at the top left of one of your own products (or **Add sub-ingredient…** at the top):

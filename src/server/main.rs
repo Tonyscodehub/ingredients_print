@@ -208,6 +208,9 @@ async fn main() {
         .route("/api/add", post(api_add))
         .route("/api/delete", post(api_delete))
         .route("/api/subs", get(api_subs))
+        .route("/api/product", get(api_get_product))
+        .route("/api/product/save", post(api_save_product))
+        .route("/api/product/duplicate", post(api_duplicate_product))
         .route("/api/sub", post(api_add_sub))
         .route("/api/helper/next", get(api_helper_next))
         .route("/api/helper/result", post(api_helper_result))
@@ -296,6 +299,7 @@ async fn api_state(State(app): State<App>) -> Response {
         "text_x_height_mm": g.cfg.text_x_height_mm,
         "font_face": g.cfg.font_face,
         "default_days": g.cfg.best_before_days.clamp(1, 10),
+        "brackets": g.cfg.allergens_in_brackets,
     }))
     .into_response()
 }
@@ -782,4 +786,140 @@ async fn api_add_sub(State(app): State<App>, Json(req): Json<SubReq>) -> Respons
     let a = app.clone();
     let _ = tokio::task::spawn_blocking(move || a.reload()).await;
     Json(json!({ "ok": true, "text": text })).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Editing a product: rename, change ingredients (add, remove, reorder), shelf
+// life and may-contain, or save as a copy.
+
+#[derive(Deserialize)]
+struct ProductQuery {
+    name: String,
+}
+
+async fn api_get_product(State(app): State<App>, Query(q): Query<ProductQuery>) -> Response {
+    let marking = app.inner.lock().unwrap().cfg.marking();
+    let path = app.spreadsheet();
+    match tokio::task::spawn_blocking(move || xlsx::read_product_raw(&path, &q.name, marking)).await {
+        Ok(Ok(p)) => Json(p).into_response(),
+        Ok(Err(e)) => err(StatusCode::NOT_FOUND, e),
+        Err(_) => err(StatusCode::INTERNAL_SERVER_ERROR, "failed"),
+    }
+}
+
+/// Tidies and checks an edited product. `except` is a name it may keep.
+fn validate_product(app: &AppState, p: &mut xlsx::RawProduct, except: Option<&str>) -> Result<(), String> {
+    p.name = p.name.split_whitespace().collect::<Vec<_>>().join(" ");
+    if p.name.is_empty() {
+        return Err("Enter the product's name.".into());
+    }
+    if xlsx::is_special_cell(&p.name) {
+        return Err("That name looks like a setting (shelf life, barcode or may contain) – choose another.".into());
+    }
+    {
+        let g = app.inner.lock().unwrap();
+        if g.products.iter().any(|x| x.name.eq_ignore_ascii_case(&p.name) && Some(x.name.as_str()) != except) {
+            return Err(format!("There's already a product called \"{}\".", p.name));
+        }
+    }
+    if let Some(d) = p.shelf_life_days {
+        if !(1..=365).contains(&d) {
+            return Err("Shelf life should be between 1 and 365 days.".into());
+        }
+    }
+    p.may_contain = p.may_contain.trim().trim_end_matches('.').to_string();
+    for ing in p.ingredients.iter_mut() {
+        ing.text = ing.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let t = &ing.text;
+        if t.is_empty() {
+            continue;
+        }
+        if xlsx::is_special_cell(t) {
+            return Err(format!("\"{t}\" looks like a setting rather than an ingredient – use the shelf life and may contain boxes instead."));
+        }
+        if t.matches('(').count() != t.matches(')').count() || t.matches('[').count() != t.matches(']').count() {
+            return Err(format!("The brackets in \"{t}\" don't match up."));
+        }
+        if t.matches('*').count() % 2 == 1 {
+            return Err(format!("\"{t}\" has an odd number of * marks – each allergen needs one before and one after."));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct SaveProductReq {
+    original: String,
+    product: xlsx::RawProduct,
+}
+
+async fn api_save_product(State(app): State<App>, Json(mut req): Json<SaveProductReq>) -> Response {
+    if let Err(e) = validate_product(&app, &mut req.product, Some(&req.original)) {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+    if req.product.barcode.is_none() && req.product.ingredients.iter().all(|i| i.text.trim().is_empty()) {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, "Add at least one ingredient (or delete the product with its bin).");
+    }
+    let marking = app.inner.lock().unwrap().cfg.marking();
+    let path = app.spreadsheet();
+    let (orig, prod) = (req.original.clone(), req.product.clone());
+    let res = tokio::task::spawn_blocking(move || xlsx::rewrite_product_column(&path, &orig, &prod, marking))
+        .await
+        .unwrap_or_else(|_| Err("failed".into()));
+    if let Err(e) = res {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("Couldn't save it to the spreadsheet: {e}"));
+    }
+    let a = app.clone();
+    let _ = tokio::task::spawn_blocking(move || a.reload()).await;
+    Json(json!({ "ok": true, "name": req.product.name })).into_response()
+}
+
+#[derive(Deserialize)]
+struct DuplicateReq {
+    product: xlsx::RawProduct,
+}
+
+async fn api_duplicate_product(State(app): State<App>, Json(mut req): Json<DuplicateReq>) -> Response {
+    // Name the copy "X (copy)", "X (copy 2)" … unless a new unused name was given.
+    let base = req.product.name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let taken: Vec<String> = app.inner.lock().unwrap().products.iter().map(|p| p.name.to_lowercase()).collect();
+    if base.is_empty() || taken.contains(&base.to_lowercase()) {
+        let stem = base.trim_end_matches(" (copy)").to_string();
+        let mut n = 1;
+        loop {
+            let cand = if n == 1 { format!("{stem} (copy)") } else { format!("{stem} (copy {n})") };
+            if !taken.contains(&cand.to_lowercase()) {
+                req.product.name = cand;
+                break;
+            }
+            n += 1;
+        }
+    }
+    if let Err(e) = validate_product(&app, &mut req.product, None) {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, e);
+    }
+    let p = &req.product;
+    let mut values = vec![p.name.clone()];
+    if let Some(d) = p.shelf_life_days {
+        values.push(format!("Shelf life: {d} day{}", if d == 1 { "" } else { "s" }));
+    }
+    if let Some(bc) = &p.barcode {
+        values.push(format!("Barcode: {bc}"));
+        if let Some(shop) = p.store.as_ref().filter(|s| !s.is_empty()) {
+            values.push(shop.clone());
+        }
+    } else {
+        values.extend(p.ingredients.iter().map(|i| i.text.trim().to_string()).filter(|t| !t.is_empty()));
+    }
+    if !p.may_contain.is_empty() {
+        values.push(format!("May contain: {}", p.may_contain));
+    }
+    let path = app.spreadsheet();
+    let res = tokio::task::spawn_blocking(move || xlsx::append_product_column(&path, &values)).await.unwrap_or_else(|_| Err("failed".into()));
+    if let Err(e) = res {
+        return err(StatusCode::UNPROCESSABLE_ENTITY, format!("Couldn't add the copy to the spreadsheet: {e}"));
+    }
+    let a = app.clone();
+    let _ = tokio::task::spawn_blocking(move || a.reload()).await;
+    Json(json!({ "ok": true, "name": req.product.name })).into_response()
 }

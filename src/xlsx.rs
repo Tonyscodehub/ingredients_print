@@ -1115,6 +1115,182 @@ pub fn insert_ingredient(path: &Path, product: &str, after: Option<usize>, text:
     save_with_backup(path, &bytes, &new_bytes)
 }
 
+/// A product's column as it's typed in the spreadsheet, for editing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RawProduct {
+    pub name: String,
+    /// "Shelf life: N days" cell text, if any (kept as typed).
+    pub shelf_life_days: Option<u32>,
+    pub may_contain: String,
+    pub barcode: Option<String>,
+    pub store: Option<String>,
+    /// Ingredient cells as typed. In bold mode, bold text is shown in *asterisks*.
+    pub ingredients: Vec<RawIngredient>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RawIngredient {
+    pub text: String,
+    /// Spreadsheet row it came from; unchanged cells keep their formatting.
+    pub row: Option<u32>,
+}
+
+fn raw_text(runs: &[Run], marking: Marking) -> String {
+    match marking {
+        Marking::Bold => runs
+            .iter()
+            .map(|r| if r.bold && !r.text.trim().is_empty() { format!("*{}*", r.text) } else { r.text.clone() })
+            .collect::<String>()
+            .replace("**", ""),
+        Marking::Brackets => plain(runs),
+    }
+}
+
+struct Loaded {
+    bytes: Vec<u8>,
+    zip: Zip,
+    sheet_path: String,
+    xml: String,
+    cells: Vec<Cell>,
+    header_row: u32,
+}
+
+fn load_sheet(path: &Path) -> Result<Loaded, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("can't open {}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).map_err(|_| "this doesn't look like an .xlsx file".to_string())?;
+    let sheet_path = first_sheet_path(&mut zip)?;
+    let xf_bold = bold_by_style(&mut zip);
+    let shared = match entry(&mut zip, "xl/sharedStrings.xml") {
+        Some(s) => parse_shared_strings(&s)?,
+        None => Vec::new(),
+    };
+    let xml = entry(&mut zip, &sheet_path).ok_or("worksheet is missing")?;
+    let cells = parse_sheet(&xml, &shared, &xf_bold)?;
+    let header_row = cells.iter().map(|c| c.row).min().ok_or("the spreadsheet is empty")?;
+    Ok(Loaded { bytes, zip, sheet_path, xml, cells, header_row })
+}
+
+fn product_col(l: &Loaded, name: &str) -> Result<u32, String> {
+    l.cells
+        .iter()
+        .find(|c| c.row == l.header_row && plain(&c.runs) == name)
+        .map(|c| c.col)
+        .ok_or_else(|| format!("\"{name}\" isn't in the spreadsheet any more – refresh and try again"))
+}
+
+/// Reads one product's column as typed, for the edit screen.
+pub fn read_product_raw(path: &Path, name: &str, marking: Marking) -> Result<RawProduct, String> {
+    let l = load_sheet(path)?;
+    let col = product_col(&l, name)?;
+    let mut column: Vec<&Cell> = l.cells.iter().filter(|c| c.col == col && c.row > l.header_row).collect();
+    column.sort_by_key(|c| c.row);
+    let mut out = RawProduct { name: name.to_string(), ..Default::default() };
+    let mut store_row = None;
+    for c in column {
+        let text = plain(&c.runs);
+        if store_row == Some(c.row) {
+            out.store = Some(strip_store_label(&text));
+        } else if let Some(bc) = parse_barcode(&text).filter(|b| !b.is_empty()) {
+            if out.barcode.is_none() {
+                out.barcode = Some(bc);
+                store_row = Some(c.row + 1);
+            }
+        } else if let Some(m) = parse_may_contain(&text) {
+            if !m.is_empty() {
+                out.may_contain = if out.may_contain.is_empty() { m } else { format!("{}, {m}", out.may_contain) };
+            }
+        } else if let Some(days) = parse_shelf_life(&text) {
+            out.shelf_life_days = out.shelf_life_days.or(days);
+        } else {
+            out.ingredients.push(RawIngredient { text: raw_text(&c.runs, marking), row: Some(c.row) });
+        }
+    }
+    Ok(out)
+}
+
+/// Rewrites a product's column from the edit screen: name, shelf life,
+/// ingredients (in the new order), and may-contain. Ingredient cells whose
+/// text is unchanged keep their original formatting. Bought-in products keep
+/// their barcode and shop cells. The original is kept as a backup.
+pub fn rewrite_product_column(path: &Path, original: &str, new: &RawProduct, marking: Marking) -> Result<(), String> {
+    let mut l = load_sheet(path)?;
+    let col = product_col(&l, original)?;
+    let before_products = build_products(l.cells.iter().map(|c| Cell { row: c.row, col: c.col, runs: c.runs.clone() }).collect(), Marking::Bold);
+    let old = read_product_raw(path, original, marking)?;
+    let letters = col_letters(col);
+    let header_row = l.header_row;
+    let taken: std::collections::HashMap<u32, String> = take_column_cells(&mut l.xml, col, header_row).into_iter().collect();
+    let style_of = |row: u32| taken.get(&row).and_then(|x| tag_attr(&x[..=x.find('>').unwrap_or(0)], "s"));
+    let old_rows: Vec<u32> = old.ingredients.iter().filter_map(|i| i.row).collect();
+    // Style for new or edited ingredients: an ingredient cell that isn't bold
+    // (so it can't turn new text bold in bold mode), else none.
+    let plain_style = l
+        .cells
+        .iter()
+        .filter(|c| c.col == col && old_rows.contains(&c.row) && c.runs.iter().all(|r| !r.bold))
+        .find_map(|c| style_of(c.row));
+
+    let mut row = header_row;
+    let mut put = |xml: &mut String, cell: String| {
+        put_cell(xml, row, col, &set_cell_ref(&cell, &format!("{letters}{row}")));
+        row += 1;
+    };
+    // Header
+    let header_cell = match taken.get(&header_row) {
+        Some(x) if new.name == original => x.clone(),
+        _ => inline_cell(&format!("{letters}{header_row}"), style_of(header_row).as_deref(), &new.name),
+    };
+    put(&mut l.xml, header_cell);
+    // Find the old special cells' styles by their text.
+    let special_style = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+        l.cells.iter().filter(|c| c.col == col && c.row > header_row).find(|c| pred(&plain(&c.runs))).and_then(|c| style_of(c.row))
+    };
+    if let Some(d) = new.shelf_life_days {
+        let st = special_style(&|t| parse_shelf_life(t).is_some());
+        put(&mut l.xml, inline_cell("A1", st.as_deref(), &format!("Shelf life: {d} day{}", if d == 1 { "" } else { "s" })));
+    }
+    if let Some(bc) = &old.barcode {
+        let st = special_style(&|t| parse_barcode(t).is_some());
+        put(&mut l.xml, inline_cell("A1", st.as_deref(), &format!("Barcode: {bc}")));
+        if let Some(shop) = old.store.as_ref().filter(|s| !s.is_empty()) {
+            put(&mut l.xml, inline_cell("A1", None, shop));
+        }
+    } else {
+        for ing in new.ingredients.iter().filter(|i| !i.text.trim().is_empty()) {
+            let text = ing.text.trim();
+            let original_cell = ing
+                .row
+                .and_then(|r| old.ingredients.iter().find(|o| o.row == Some(r)).filter(|o| o.text == text).and_then(|_| taken.get(&r)));
+            let cell = match original_cell {
+                Some(x) => x.clone(),
+                None => inline_cell("A1", plain_style.as_deref(), text),
+            };
+            put(&mut l.xml, cell);
+        }
+    }
+    let may = new.may_contain.trim().trim_end_matches('.');
+    if !may.is_empty() {
+        let st = special_style(&|t| parse_may_contain(t).is_some());
+        put(&mut l.xml, inline_cell("A1", st.as_deref(), &format!("May contain: {may}")));
+    }
+
+    let new_bytes = rebuild_zip(&mut l.zip, &l.sheet_path, &l.xml)?;
+    let after = read_products_from_bytes(new_bytes.clone(), marking)?;
+    let p = after.iter().find(|p| p.name == new.name).ok_or("the change didn't read back correctly, so the spreadsheet was left unchanged")?;
+    let expected = if old.barcode.is_some() { p.ingredients.len() } else { new.ingredients.iter().filter(|i| !i.text.trim().is_empty()).count() };
+    let others_ok = after.len() == before_products.len()
+        && read_products_from_bytes(new_bytes.clone(), Marking::Bold)?
+            .iter()
+            .filter(|x| x.name != new.name)
+            .eq(before_products.iter().filter(|x| x.name != original));
+    if p.ingredients.len() != expected || p.shelf_life_days != new.shelf_life_days || !others_ok {
+        return Err("the change didn't read back correctly, so the spreadsheet was left unchanged".into());
+    }
+    save_with_backup(path, &l.bytes, &new_bytes)
+}
+
 fn read_products_from_bytes(bytes: Vec<u8>, marking: Marking) -> Result<Vec<Product>, String> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| e.to_string())?;
     let sheet_path = first_sheet_path(&mut zip)?;
@@ -1182,6 +1358,58 @@ mod write_tests {
         let f = read_products(&p, Marking::Brackets).unwrap().into_iter().find(|x| x.name == "Flapjack").unwrap();
         assert_eq!(f.ingredients[0].iter().map(|r| r.text.as_str()).collect::<String>(), "Golden syrup (sugar syrup)");
         assert!(insert_ingredient(&p, "Shortbread Fingers", None, "x", None).is_err());
+        println!("{}", p.display());
+    }
+
+    #[test]
+    fn edits_a_product() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/Products.xlsx");
+        let dir = std::env::temp_dir().join("allergen_edit_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("Products.xlsx");
+        std::fs::copy(&src, &p).unwrap();
+        let orig = read_products(&p, Marking::Brackets).unwrap();
+        let mut raw = read_product_raw(&p, "Victoria Sponge", Marking::Brackets).unwrap();
+        assert_eq!(raw.shelf_life_days, Some(2));
+        assert_eq!(raw.ingredients[0].text, "Flour (wheat)");
+        // Rename, reorder (swap first two), remove the last, add one, change shelf life, add may contain.
+        raw.name = "Classic Victoria Sponge".into();
+        raw.ingredients.swap(0, 1);
+        raw.ingredients.pop();
+        raw.ingredients.push(RawIngredient { text: "Raspberries".into(), row: None });
+        raw.shelf_life_days = Some(3);
+        raw.may_contain = "nuts".into();
+        rewrite_product_column(&p, "Victoria Sponge", &raw, Marking::Brackets).unwrap();
+        let ps = read_products(&p, Marking::Brackets).unwrap();
+        assert_eq!(ps.len(), orig.len());
+        let v = ps.iter().find(|x| x.name == "Classic Victoria Sponge").unwrap();
+        let texts: Vec<String> = v.ingredients.iter().map(|c| c.iter().map(|r| r.text.as_str()).collect()).collect();
+        let o = orig.iter().find(|x| x.name == "Victoria Sponge").unwrap();
+        let otexts: Vec<String> = o.ingredients.iter().map(|c| c.iter().map(|r| r.text.as_str()).collect()).collect();
+        assert_eq!(texts[0], otexts[1]);
+        assert_eq!(texts[1], otexts[0]);
+        assert_eq!(texts.last().unwrap(), "Raspberries");
+        assert_eq!(texts.len(), otexts.len());
+        assert_eq!(v.shelf_life_days, Some(3));
+        assert_eq!(v.may_contain.as_deref(), Some("nuts"));
+        // Shrinking leaves no stray cells behind.
+        let mut raw = read_product_raw(&p, "Classic Victoria Sponge", Marking::Brackets).unwrap();
+        raw.ingredients.truncate(2);
+        raw.may_contain.clear();
+        raw.shelf_life_days = None;
+        rewrite_product_column(&p, "Classic Victoria Sponge", &raw, Marking::Brackets).unwrap();
+        let v = read_products(&p, Marking::Brackets).unwrap().into_iter().find(|x| x.name == "Classic Victoria Sponge").unwrap();
+        assert_eq!(v.ingredients.len(), 2);
+        assert_eq!(v.may_contain, None);
+        assert_eq!(v.shelf_life_days, None);
+        // Bought-in: rename keeps barcode and shop.
+        let mut raw = read_product_raw(&p, "Shortbread Fingers", Marking::Brackets).unwrap();
+        raw.name = "Shortbread".into();
+        rewrite_product_column(&p, "Shortbread Fingers", &raw, Marking::Brackets).unwrap();
+        let s = read_products(&p, Marking::Brackets).unwrap().into_iter().find(|x| x.name == "Shortbread").unwrap();
+        assert_eq!(s.barcode.as_deref(), Some("5010251703129"));
+        assert_eq!(s.store.as_deref(), Some("Morrisons"));
         println!("{}", p.display());
     }
 
