@@ -52,6 +52,8 @@ const S_KEY: i32 = 2020;
 const S_SELFSIGNED: i32 = 2021;
 const S_TRAY: i32 = 2022;
 const S_AUTOSTART: i32 = 2023;
+const S_WEBURL: i32 = 2024;
+const S_WEBKEY: i32 = 2025;
 
 const TIMER_POLL: usize = 1;
 const TIMER_EDIT: usize = 2;
@@ -64,6 +66,7 @@ const WM_APP_PRODUCTS: u32 = WM_APP + 6;
 const WM_APP_UPLOADED: u32 = WM_APP + 7;
 const WM_APP_EDITREADY: u32 = WM_APP + 8;
 const WM_APP_EDITREQ: u32 = WM_APP + 9;
+const WM_APP_PUBLISHED: u32 = WM_APP + 10;
 const ID_TRAY_OPEN: usize = 9001;
 const ID_TRAY_EXIT: usize = 9002;
 
@@ -130,6 +133,11 @@ struct App {
     /// After adding a product via the web app, open its check once the list arrives.
     pending_check: Option<String>,
     edit: Option<Edit>,
+    /// Website allergen page: fingerprint of what was last sent successfully.
+    web_published: Option<u64>,
+    web_error: Option<String>,
+    web_last_try: Option<Instant>,
+    web_busy: bool,
 }
 
 /// The web app's spreadsheet opened in Excel (or another app) for editing.
@@ -303,6 +311,10 @@ pub fn run() {
                 loading: false,
                 pending_check: None,
                 edit: None,
+                web_published: None,
+                web_error: None,
+                web_last_try: None,
+                web_busy: false,
             })
         });
 
@@ -409,6 +421,12 @@ fn label_cfg(a: &App) -> Config {
 
 /// Puts a new product list in place. Returns (changed, first load).
 fn install_products(ps: Vec<Product>) -> (bool, bool) {
+    let r = install_products_inner(ps);
+    maybe_publish(false);
+    r
+}
+
+fn install_products_inner(ps: Vec<Product>) -> (bool, bool) {
     with(|a| {
         a.last_load = Instant::now();
         let changed = a.products != ps;
@@ -593,6 +611,7 @@ fn reload(manual: bool) {
 }
 
 fn poll() {
+    maybe_publish(false);
     if server().is_some() {
         // The web app's list is small: ask for it every minute.
         reload(false);
@@ -930,6 +949,12 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             on_products(manual, res);
             0
         }
+        WM_APP_PUBLISHED => {
+            let b = Box::from_raw(lp as *mut (u64, Result<usize, String>));
+            let (hash, res) = *b;
+            on_published(hash, res);
+            0
+        }
         WM_APP_EDITREQ => {
             edit_spreadsheet();
             0
@@ -1120,7 +1145,7 @@ fn open_settings() {
         }
         let cls = wide("AllergenSettings");
         let title = wide("Settings");
-        let (w, h) = (s(660), s(834));
+        let (w, h) = (s(660), s(908));
         let mut mr: RECT = std::mem::zeroed();
         GetWindowRect(main, &mut mr);
         let x = mr.left + ((mr.right - mr.left) - w) / 2;
@@ -1266,6 +1291,15 @@ fn open_settings() {
         SendMessageW(cb, BM_SETCHECK, cfg.server_allow_self_signed as usize, 0);
         y += step;
 
+        label("Website allergen page:", lx, y, lw);
+        place(S_WEBURL, "EDIT", &cfg.website_url, edit, WS_EX_CLIENTEDGE, cx, y, s(414), rh);
+        y += step;
+
+        label("Website key:", lx, y, lw);
+        place(S_WEBKEY, "EDIT", &cfg.website_key, edit | ES_PASSWORD as u32, WS_EX_CLIENTEDGE, cx, y, s(220), rh);
+        label("…/allergens/shed/update.php and its key", cx + s(228), y, s(200));
+        y += step;
+
         let tc = place(
             S_TRAY,
             "BUTTON",
@@ -1331,6 +1365,11 @@ fn save_settings(hwnd: HWND) -> bool {
             a.server_cfg = None;
             a.server_version.clear();
         }
+        if a.cfg.website_url != cfg.website_url || a.cfg.website_key != cfg.website_key {
+            a.web_published = None;
+            a.web_error = None;
+            a.web_last_try = None;
+        }
         let helper = a.cfg.server_url != cfg.server_url
             || a.cfg.server_key != cfg.server_key
             || a.cfg.server_allow_self_signed != cfg.server_allow_self_signed
@@ -1352,6 +1391,7 @@ fn save_settings(hwnd: HWND) -> bool {
         rebuild_buttons();
     }
     invalidate_preview();
+    maybe_publish(false);
     if let Some((main, on)) = with(|a| (a.main, a.cfg.start_in_tray)) {
         if on {
             unsafe { tray_add(main) };
@@ -1439,6 +1479,11 @@ fn read_form(wnd: HWND) -> Result<Config, String> {
     cfg.server_key = get_text(item(S_KEY)).trim().to_string();
     cfg.server_allow_self_signed = unsafe { SendMessageW(item(S_SELFSIGNED), BM_GETCHECK, 0, 0) } == 1;
     cfg.start_in_tray = unsafe { SendMessageW(item(S_TRAY), BM_GETCHECK, 0, 0) } == 1;
+    cfg.website_url = get_text(item(S_WEBURL)).trim().to_string();
+    if !cfg.website_url.is_empty() && split_url(&cfg.website_url).is_none() {
+        return Err("The website allergen page address doesn't look right. It should be like https://poffles.co.uk/allergens/shed/update.php".into());
+    }
+    cfg.website_key = get_text(item(S_WEBKEY)).trim().to_string();
     cfg.address = get_text(item(S_ADDRESS)).trim().to_string();
     cfg.contact = get_text(item(S_CONTACT)).trim().to_string();
     cfg.warning = get_text(item(S_WARNING)).trim().to_string();
@@ -2226,6 +2271,134 @@ fn on_uploaded(mtime: Option<SystemTime>, res: Result<Upload, String>) {
             });
             set_status(&format!("{e} – will try sending your spreadsheet changes again."));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Website allergen page: send the products and allergens to the website's
+// update.php whenever they change, so the public page always matches.
+
+/// "https://host[:port]/path" → (secure, host, port, path).
+fn split_url(url: &str) -> Option<(bool, String, u16, String)> {
+    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return None;
+    };
+    let (hostport, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], rest[i..].to_string()),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().ok()?),
+        None => (hostport.to_string(), if secure { 443 } else { 80 }),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some((secure, host, port, path))
+}
+
+fn fnv64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Sends the products to the website if they've changed since the last
+/// successful send (or always, when `force`). Runs the request on a thread.
+fn maybe_publish(force: bool) {
+    let Some(Some((url, key, body, hash, main))) = with(|a| {
+        let url = a.cfg.website_url.trim().to_string();
+        if url.is_empty() || a.web_busy || a.products.is_empty() {
+            return None;
+        }
+        let data = crate::publish::site_data(&a.products, &label_cfg(a));
+        let value = serde_json::to_value(&data).ok()?;
+        let hash = fnv64(value.to_string().as_bytes());
+        if !force {
+            if a.web_published == Some(hash) {
+                return None;
+            }
+            // After a failure, wait a couple of minutes before trying again.
+            if a.web_error.is_some() && a.web_last_try.map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(120)) {
+                return None;
+            }
+        }
+        let mut value = value;
+        if let Some(o) = value.as_object_mut() {
+            o.insert("updated".into(), serde_json::json!(format!("{}, {}", today(), now_hhmm())));
+        }
+        a.web_busy = true;
+        a.web_last_try = Some(Instant::now());
+        Some((url, a.cfg.website_key.trim().to_string(), value.to_string(), hash, a.main as usize))
+    }) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let res = send_to_website(&url, &key, body.as_bytes());
+        let b = Box::into_raw(Box::new((hash, res)));
+        unsafe {
+            if PostMessageW(main as HWND, WM_APP_PUBLISHED, 0, b as isize) == 0 {
+                drop(Box::from_raw(b));
+            }
+        }
+    });
+}
+
+fn send_to_website(url: &str, key: &str, body: &[u8]) -> Result<usize, String> {
+    let (secure, host, port, path) = split_url(url).ok_or("the website address doesn't look right")?;
+    let headers = format!("Content-Type: application/json\r\nAccept: application/json\r\nX-Publish-Key: {key}\r\n");
+    let req = crate::http::Req {
+        secure,
+        host: &host,
+        port,
+        method: "POST",
+        path: &path,
+        body: Some(body),
+        headers: &headers,
+        insecure: false,
+        receive_timeout_ms: 30_000,
+    };
+    let resp = crate::http::send(&req, crate::lookup::USER_AGENT).map_err(|e| format!("couldn't reach the website ({e})"))?;
+    let v: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or(serde_json::Value::Null);
+    if resp.status == 200 && v.get("ok").and_then(|x| x.as_bool()) == Some(true) {
+        return Ok(v.get("count").and_then(|c| c.as_u64()).unwrap_or(0) as usize);
+    }
+    Err(match (resp.status, v.get("error").and_then(|e| e.as_str())) {
+        (_, Some(e)) => format!("the website said: {e}"),
+        (404, None) => "the website address wasn't found (404)".into(),
+        (200, None) => "the website replied, but not as expected – check the address ends in update.php".into(),
+        (code, None) => format!("the website replied with error {code}"),
+    })
+}
+
+fn on_published(hash: u64, res: Result<usize, String>) {
+    let first_error = with(|a| {
+        a.web_busy = false;
+        match &res {
+            Ok(_) => {
+                a.web_published = Some(hash);
+                a.web_error = None;
+                false
+            }
+            Err(e) => {
+                let first = a.web_error.as_deref() != Some(e.as_str());
+                a.web_error = Some(e.clone());
+                first
+            }
+        }
+    })
+    .unwrap_or(false);
+    match res {
+        Ok(n) => set_status(&format!("Website allergen page updated at {} ({n} products).", now_hhmm())),
+        Err(e) if first_error => set_status(&format!("Couldn't update the website allergen page: {e}. Trying again shortly.")),
+        Err(_) => {}
     }
 }
 

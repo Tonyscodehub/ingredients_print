@@ -5,4 +5,5 @@ pub mod content;
 pub mod date;
 pub mod helper;
 pub mod lookup;
+pub mod publish;
 pub mod xlsx;

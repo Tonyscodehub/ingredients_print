@@ -1,0 +1,12 @@
+Options -Indexes
+DirectoryIndex index.php
+
+<FilesMatch "^(config\.php|data\.json\.tmp)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    <FilesMatch "^(index\.php|data\.json)$">
+        Header set Cache-Control "no-cache"
+    </FilesMatch>
+</IfModule>

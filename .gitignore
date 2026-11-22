@@ -3,3 +3,5 @@
 /certs/*
 !/certs/README.txt
 .env
+/website/**/config.php
+/website/**/data.json

@@ -100,7 +100,7 @@ fn tag_name(t: &str) -> String {
 }
 
 /// Words to bold for each Open Food Facts allergen tag (UK's 14 allergens).
-fn keywords(tag: &str) -> &'static [&'static str] {
+pub(crate) fn keywords(tag: &str) -> &'static [&'static str] {
     match tag {
         "en:gluten" => &["wheat", "barley", "rye", "oat", "oats", "spelt", "kamut", "gluten"],
         "en:milk" => &["milk", "butter", "buttermilk", "cream", "cheese", "whey", "lactose", "yoghurt", "yogurt", "casein"],
@@ -124,7 +124,7 @@ fn keywords(tag: &str) -> &'static [&'static str] {
 }
 
 /// Words that look like an allergen but aren't after these (cocoa butter, coconut milk…).
-fn false_friend(prev: &str, word: &str) -> bool {
+pub(crate) fn false_friend(prev: &str, word: &str) -> bool {
     match word {
         "butter" => matches!(prev, "cocoa" | "shea" | "peanut" | "nut" | "almond" | "cashew"),
         "milk" => matches!(prev, "coconut" | "oat" | "almond" | "soya" | "soy" | "rice"),

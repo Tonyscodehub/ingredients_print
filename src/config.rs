@@ -43,6 +43,10 @@ pub struct Config {
     pub server_allow_self_signed: bool,
     /// Start hidden in the notification area (and minimise to it).
     pub start_in_tray: bool,
+    /// Windows app: the website allergen page's update.php (empty = off).
+    pub website_url: String,
+    /// Windows app: key the website's update.php expects (its config.php).
+    pub website_key: String,
     /// Best before = day printed + this many days. 0 = don't print a date.
     pub best_before_days: u32,
 }
@@ -71,6 +75,8 @@ impl Default for Config {
             server_key: String::new(),
             server_allow_self_signed: true,
             start_in_tray: false,
+            website_url: String::new(),
+            website_key: String::new(),
         }
     }
 }

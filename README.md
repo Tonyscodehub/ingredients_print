@@ -213,3 +213,20 @@ cargo build --release --target x86_64-pc-windows-gnu
 The web app (Linux) builds with `cargo build --release --features server --bin labels-server`, or with the Dockerfile.
 
 The spreadsheet reader has tests (`cargo test`) that run on any OS.
+
+## Allergen page on the website
+
+The Windows app can keep a public allergen page up to date, for example `https://poffles.co.uk/allergens/shed/`. It shows each product with its allergens, its ingredients (allergens in bold), and any "may contain" warning. Customers can tap an allergen to hide the products that contain it. Bought-in products that haven't been checked yet are listed with a note to read the pack.
+
+**On the website (any PHP hosting, such as Krystal's cPanel):**
+
+1. Make the folder, for example `public_html/allergens/shed`.
+2. Upload everything in `website/allergens/shed` to it.
+3. Copy `config.example.php` to `config.php` and put a long random key in it.
+
+**In the Windows app:** open **Settings** and fill in:
+
+- **Website allergen page:** the address of `update.php`, such as `https://poffles.co.uk/allergens/shed/update.php`.
+- **Website key:** the key from `config.php`.
+
+Whenever the products change, the Windows app sends them to the page within a minute. It checks every minute, so the page catches up as soon as the app is running again after the PC has been off. The status bar says when the page was last updated, or why it couldn't be.
